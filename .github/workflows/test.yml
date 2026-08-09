@@ -38,3 +38,8 @@ jobs:
 
       - name: Run tests
         run: pytest -m "not slow" -q
+
+      - name: Documentation examples
+        # Executes every code block of every docs page against the installed
+        # package; a docs example that drifts from the API fails CI.
+        run: pytest -m slow tests/test_docs_examples.py -q

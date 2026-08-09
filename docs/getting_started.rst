@@ -86,7 +86,7 @@ Update the runtime in the affected environment::
 
     conda install -c conda-forge "vc14_runtime>=14.40"
 
-Wheels built from current sources also carry two mitigations (a
-compatibility define for the pre-14.40 mutex layout, and a vendored copy of
-the runtime inside the wheel), so upcoming releases import cleanly even in
-environments with the older runtime.
+From 0.1.1 on, the wheels link the MSVC runtime statically and load no
+``msvcp140.dll`` at all, so they import cleanly regardless of the
+environment's runtime version; the fix above is only needed for the 0.1.0
+wheels.

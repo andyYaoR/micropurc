@@ -37,6 +37,14 @@ pytestmark = [
 ]
 
 
+def test_pipeline_script_runs(tmp_path, monkeypatch):
+    """The downloadable pipeline.py runs standalone from an empty directory."""
+    import runpy
+
+    monkeypatch.chdir(tmp_path)
+    runpy.run_path(str(DOCS / "examples" / "pipeline.py"), run_name="__main__")
+
+
 @pytest.mark.parametrize("group", GROUPS, ids=list(GROUPS))
 def test_doc_code_blocks_execute(group, tmp_path, monkeypatch):
     """Every code block in the group runs without errors or RuntimeWarnings."""

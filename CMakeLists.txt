@@ -5,6 +5,19 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if(MSVC)
+  # Link the MSVC runtime statically: the extension then loads no
+  # msvcp140.dll at all, so an outdated copy shadowing the system one (conda
+  # environments ship their own, and the mismatch is a silent access
+  # violation on import) cannot affect it. Set before any target is created
+  # so it also applies to nanobind's static library.
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  # Belt for source builds that keep the dynamic runtime: restore the
+  # pre-14.40 std::mutex layout in every translation unit, nanobind's
+  # included.
+  add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
+endif()
+
 # ── Python + nanobind ────────────────────────────────────────────────
 find_package(Python 3.10 COMPONENTS Interpreter Development.Module REQUIRED)
 
@@ -159,13 +172,6 @@ else()
   # CMAKE_CXX_FLAGS_RELEASE for MSVC already contains /O2 /Ob2 /DNDEBUG
   # (see Modules/Platform/Windows-MSVC.cmake). Adding /O2 here again would
   # be redundant and risk duplicate-flag warnings.
-  #
-  # Binaries built by MSVC 17.10+ crash with a silent access violation when
-  # the process has already loaded an msvcp140.dll older than 14.40 -- conda
-  # environments ship their own copy that shadows the system one. The define
-  # restores the pre-17.10 std::mutex layout so the extension also runs
-  # against those older runtimes.
-  target_compile_definitions(_native PRIVATE _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
 endif()
 
 # Install into the micropurc package directory.

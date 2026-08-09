@@ -12,8 +12,9 @@ and this project adheres to
 
 - Windows wheels no longer crash with a silent access violation on import in
   environments whose `msvcp140.dll` is older than 14.40 (conda ships one):
-  the extension is compiled with the pre-14.40 mutex-layout compatibility
-  define and the wheel vendors the MSVC C++ runtime.
+  the extension links the MSVC runtime statically and loads no
+  `msvcp140.dll` at all; source builds that keep the dynamic runtime compile
+  with the pre-14.40 mutex-layout compatibility define.
 - The end-to-end documentation example is self-contained after
   `pip install micropurc` (grid network, no data files) and every
   documentation code block is executed by the test suite.

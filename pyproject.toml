@@ -111,14 +111,6 @@ test-sources = ["tests", "pyproject.toml"]
 # cmd, which would pass 'not and slow' to pytest as literal file arguments.
 test-command = 'pytest -m "not slow" tests'
 
-[tool.cibuildwheel.windows]
-# Vendor the MSVC C++ runtime into the wheel (delvewheel name-mangles it) so
-# the extension never binds to an older msvcp140.dll already loaded by the
-# host environment; conda ships its own copy, and the version mismatch is a
-# silent access violation on import.
-before-build = "pip install delvewheel"
-repair-wheel-command = "delvewheel repair --include msvcp140.dll -w {dest_dir} {wheel}"
-
 [tool.cibuildwheel.macos]
 # 11.0 (Big Sur) is the oldest macOS supported by our toolchain's C++17
 # runtime and the oldest with arm64 support, so one target covers both arches.
