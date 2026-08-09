@@ -2,8 +2,8 @@ cff-version: 1.2.0
 message: "If you use this software, please cite both the software and the accompanying article."
 type: software
 title: "micropurc"
-version: 0.1.0
-date-released: '2026-08-09'
+version: 0.1.1
+date-released: '2026-08-10'
 license: MIT
 repository-code: "https://github.com/andyYaoR/micropurc"
 authors:
