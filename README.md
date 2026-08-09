@@ -72,9 +72,9 @@ Full documentation is hosted at
   end-to-end pipeline, model specification, simulation, and run reporting
 - [API reference](https://andyyaor.github.io/micropurc/api/index.html)
 
-Also in this repo: `scripts/paper/` holds the paper's simulation experiments (run
-`git lfs install` first to fetch the bundled network data), `pytest` runs the
-test suite, and `make -C docs html` builds the docs locally.
+Also in this repo: `scripts/paper/` holds the paper's simulation experiments
+(the network data ships in the repository), `pytest` runs the test suite, and
+`make -C docs html` builds the docs locally.
 
 ## Citing
 
