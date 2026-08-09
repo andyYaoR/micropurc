@@ -1,0 +1,51 @@
+# Never touch vendored code, the read-only legacy oracle, or the reference
+# paper sources. (configs/ and experiments/ are gitignored.)
+exclude: '^(extern/|micropurc_sim/|ref/|\.vscode/)'
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.13
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+
+  - repo: https://github.com/pycqa/pydocstyle
+    rev: 6.3.0
+    hooks:
+      - id: pydocstyle
+        additional_dependencies: [toml]
+        files: '^src/micropurc/.*\.py$'
+
+  - repo: https://github.com/terrencepreilly/darglint
+    rev: v1.8.1
+    hooks:
+      - id: darglint
+        args: ["--docstring-style", "google", "--strictness", "long"]
+        files: '^src/micropurc/.*\.py$'
+        # forward/base.py declares a Protocol with `...` stub bodies, which
+        # darglint misreads as excess-return (DAR202).
+        exclude: '^src/micropurc/forward/base\.py$'
+
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v19.1.7
+    hooks:
+      - id: clang-format
+        files: '^src/micropurc/_native/.*\.(cpp|hpp|h|cu|cuh)$'
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+
+  - repo: local
+    hooks:
+      - id: check-build-artifacts
+        name: Check for committed build artifacts
+        entry: python scripts/check_build_artifacts.py
+        language: system
+        pass_filenames: false

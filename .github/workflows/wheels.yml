@@ -1,0 +1,77 @@
+name: wheels
+
+# Tag-triggered builds run via publish.yml (workflow_call), so a release
+# builds the wheel matrix exactly once.
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build_wheels:
+    name: wheels ${{ matrix.os }} ${{ matrix.archs }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            archs: x86_64
+          - os: ubuntu-latest
+            archs: aarch64
+            qemu: true
+          - os: macos-13
+            archs: x86_64
+          - os: macos-latest
+            archs: arm64
+          - os: windows-latest
+            archs: AMD64
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        if: matrix.qemu
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - name: Gate on upstream wheel support
+        # Skips any CPython minor that not every runtime dependency ships
+        # wheels for; a new stable Python is adopted automatically once the
+        # last upstream publishes wheels. Emits CIBW_SKIP into the job env.
+        shell: bash
+        run: python3 scripts/ci/upstream_python_support.py
+
+      - name: Build wheels
+        # All build/test configuration (skips, test command, CMAKE_ARGS, the
+        # aarch64 import-only override) lives in pyproject.toml
+        # [tool.cibuildwheel]; this workflow only selects the OS and archs.
+        # Major pin: minor cibuildwheel releases (which add new stable Pythons)
+        # apply automatically; the v3->v4 jump arrives as a Dependabot PR.
+        uses: pypa/cibuildwheel@v3
+        env:
+          CIBW_ARCHS: ${{ matrix.archs }}
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.archs }}
+          path: wheelhouse/*.whl
+
+  build_sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build sdist
+        run: pipx run build --sdist
+
+      - name: Check sdist metadata
+        run: pipx run twine check dist/*.tar.gz
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: sdist
+          path: dist/*.tar.gz

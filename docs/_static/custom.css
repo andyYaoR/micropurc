@@ -1,0 +1,13 @@
+/* Slightly wider content column and tighter code blocks for the API pages. */
+.sidebar-drawer {
+    width: 15em;
+}
+
+div.highlight pre {
+    font-size: 0.85rem;
+    line-height: 1.4;
+}
+
+dl.py dt {
+    scroll-margin-top: 1rem;
+}

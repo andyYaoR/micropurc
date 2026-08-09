@@ -1,0 +1,29 @@
+# Reproducible build environment for micropurc (single laptop, no MPI).
+#
+# Creates the conda layer + the native build toolchain. After
+#   conda env create -f environment.yml      # (or: conda env update -f environment.yml)
+#   conda activate micropurc
+# run scripts/dev_setup.sh to editable-install micropurc itself.
+#
+# Why these live here instead of being auto-resolved by `pip install .`
+# (both learned rebuilding this env from scratch, 2026-07-12):
+#   * eigen  — the C++ extension needs Eigen3 headers at BUILD time
+#     (CMakeLists.txt find_package(Eigen3)). Eigen is NOT vendored; only PIQP is
+#     (extern/piqp). A bare Python env fails CMake configuration with
+#     "Eigen3 not found".
+#   * scikit-build-core / nanobind / cmake / ninja — must live IN this env
+#     because dev_setup.sh installs with --no-build-isolation, so the editable
+#     build compiles the extension with THIS env's toolchain. (pyproject sets
+#     editable.rebuild=false; after C++/CMake changes rerun `pip install -e .`.)
+name: micropurc
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - eigen>=3.4
+  - pip
+  - pip:
+      - scikit-build-core>=0.8
+      - nanobind>=2.0
+      - cmake>=3.28
+      - ninja

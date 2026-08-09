@@ -1,0 +1,180 @@
+[build-system]
+requires = ["scikit-build-core>=0.8", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "micropurc"
+version = "0.1.0"
+description = "Estimating the perturbed utility route choice model with trip-level data"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "LICENSES/*"]
+requires-python = ">=3.10"
+authors = [
+    { name = "Rui Yao", email = "rui.yao@technion.ac.il" },
+]
+keywords = [
+    "route choice",
+    "discrete choice",
+    "transportation",
+    "econometrics",
+    "perturbed utility",
+    "network",
+]
+# No "License ::" classifier: the SPDX `license` field above replaces it, and
+# twine warns when both are present.
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: C++",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "piqp>=0.4",
+    "networkx>=3.0",
+    "pandas>=1.5",
+]
+
+[project.urls]
+Homepage = "https://andyyaor.github.io/micropurc_estimation/"
+Documentation = "https://andyyaor.github.io/micropurc_estimation/"
+Repository = "https://github.com/andyYaoR/micropurc_estimation"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "hypothesis>=6.0",
+    "ruff>=0.4",
+    "pre-commit>=3.5",
+    "pydocstyle>=6.3",
+    "darglint>=1.8",
+]
+docs = [
+    "sphinx>=7.0",
+    "furo>=2024.0",
+    "sphinx-autodoc-typehints>=2.0",
+    "sphinxcontrib-napoleon>=0.7",
+]
+
+[tool.scikit-build]
+wheel.packages = ["src/micropurc"]
+build-dir = "build/{wheel_tag}"
+cmake.build-type = "Release"
+# Do NOT auto-recompile the native extension on import. Auto-rebuild runs CMake
+# in the *runtime* environment, which under PEP 517 build isolation lacks the
+# build deps (nanobind, and the CMAKE_ARGS/CMAKE_PREFIX_PATH used for Eigen), so
+# `import micropurc` fails on conda/Windows. Keep the scikit-build-core default
+# (false): after pulling C++/CMake changes, rerun `pip install -e .` manually.
+editable.rebuild = false
+editable.verbose = false
+
+[tool.scikit-build.sdist]
+# The sdist is assembled from the source TREE, so .gitignore alone is not a
+# release policy: everything below is tracked (or could be) yet is local working
+# material -- internal notes, generated results, editor/CI config, LFS-backed
+# benchmark data -- that must never ship in a release artifact. Verify after any
+# change with: tar -tzf dist/micropurc-*.tar.gz
+# NOTE: extern/ is deliberately NOT excluded -- the vendored PIQP headers there
+# are required to compile the native extension from an sdist.
+exclude = [
+    "docs/qa",
+    "docs/prediction_metrics",
+    "results",
+    "scripts/paper/data",
+    ".github",
+    ".vscode",
+    "environment.yml",
+]
+
+[tool.cibuildwheel]
+# No explicit build list: cibuildwheel builds every *stable* CPython that
+# satisfies requires-python, and scripts/ci/upstream_python_support.py skips
+# any minor that not every runtime dependency ships wheels for, so a new
+# Python is adopted automatically once it leaves pre-release and the last
+# upstream publishes support.
+# Free-threaded (cp3Nt) builds stay off until the extension audits and
+# declares free-threading support; a t-wheel that silently re-enables the GIL
+# is worse than none.
+skip = ["*-musllinux*", "pp*", "cp3*t-*"]
+# Portable wheels: never bake the build machine's CPU features into a
+# distributed binary (belt-and-braces; the CMake default is also OFF).
+environment = { CMAKE_ARGS = "-DMICROPURC_NATIVE_ARCH=OFF" }
+test-requires = ["pytest"]
+test-sources = ["tests", "pyproject.toml"]
+test-command = "pytest -m 'not slow' tests"
+
+[tool.cibuildwheel.macos]
+# 11.0 (Big Sur) is the oldest macOS supported by our toolchain's C++17
+# runtime and the oldest with arm64 support, so one target covers both arches.
+environment = { CMAKE_ARGS = "-DMICROPURC_NATIVE_ARCH=OFF", MACOSX_DEPLOYMENT_TARGET = "11.0" }
+
+[[tool.cibuildwheel.overrides]]
+# aarch64 Linux wheels build under QEMU emulation; the full suite would take
+# unreasonably long, so run an import smoke test only.
+select = "*aarch64*"
+test-command = "python -c \"import micropurc; micropurc.MicroPURCEstimator\""
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "requires_data: needs external data files not bundled with the repository",
+    "slow: long-running tests",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src"]
+force-exclude = true
+extend-exclude = [
+    "experiments",
+    "empirical",
+    "micropurc_sim",
+    "extern",
+    "ref",
+    "configs",
+    "docs",
+    "build",
+    "scripts/paper",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "D", "UP"]
+ignore = ["D100", "D104"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests need no docstrings, commonly set up sys.path before imports (E402),
+# and keep intermediate values for readability (F841).
+"tests/**" = ["D101", "D102", "D103", "D105", "D107", "E402", "F841"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.pydocstyle]
+convention = "google"
+match = "(?!test_).*\\.py"
+# Align pydocstyle with ruff's google convention: these are style
+# preferences (multi-line summaries, non-imperative mood, ...) that the
+# Sphinx docs render correctly.
+add-ignore = [
+    "D100",  # Missing docstring in public module
+    "D104",  # Missing docstring in public package
+    "D107",  # Missing docstring in __init__
+    "D200",  # One-line docstring should fit on one line
+    "D203",  # One blank line before class
+    "D205",  # Blank line after summary
+    "D212",  # Multi-line summary on the first line
+    "D400",  # First line ends with a period
+    "D401",  # First line in imperative mood
+    "D415",  # First line ends with punctuation
+]
+
+[tool.darglint]
+docstring_style = "google"
+strictness = "long"
