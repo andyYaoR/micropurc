@@ -54,7 +54,7 @@ jobs:
         env:
           CIBW_ARCHS: ${{ matrix.archs }}
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.archs }}
           path: wheelhouse/*.whl
@@ -71,7 +71,7 @@ jobs:
       - name: Check sdist metadata
         run: pipx run twine check dist/*.tar.gz
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: dist/*.tar.gz
