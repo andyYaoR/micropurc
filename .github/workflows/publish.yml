@@ -1,0 +1,69 @@
+# Publishing uses PyPI Trusted Publishing (OIDC) exclusively: no API tokens,
+# no repository secrets.
+#
+# MANUAL PREREQUISITES (cannot be automated from this repository):
+#   1. Register the Trusted Publisher for the "micropurc" project on BOTH
+#      pypi.org and test.pypi.org, pointing at the final public repository
+#      (workflow file: publish.yml; environment: "pypi" on pypi.org,
+#      "testpypi" on test.pypi.org).
+#   2. Create the two GitHub environments "pypi" and "testpypi" in the
+#      repository settings.
+#
+# Release flow: workflow_dispatch publishes to TestPyPI (the rehearsal path);
+# pushing a v* tag publishes to real PyPI.
+
+name: publish
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/wheels.yml
+
+  publish-testpypi:
+    name: Publish to TestPyPI
+    if: github.event_name == 'workflow_dispatch'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/micropurc
+    permissions:
+      id-token: write
+    steps:
+      - name: Download all distribution artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  publish-pypi:
+    name: Publish to PyPI
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/micropurc
+    permissions:
+      id-token: write
+    steps:
+      - name: Download all distribution artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

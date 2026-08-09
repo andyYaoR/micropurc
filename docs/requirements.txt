@@ -1,0 +1,11 @@
+# Dependencies for building the documentation without compiling the native
+# extension. The runtime libraries below are imported by autodoc; the compiled
+# module (micropurc._native) and PIQP are mocked in conf.py.
+sphinx>=7.0
+furo>=2024.0
+sphinx-autodoc-typehints>=2.0
+sphinxcontrib-napoleon>=0.7
+numpy>=1.24
+scipy>=1.10
+pandas>=1.5
+networkx>=3.0

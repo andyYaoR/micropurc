@@ -1,0 +1,78 @@
+name: wheels
+
+# Tag-triggered builds run via publish.yml (workflow_call), so a release
+# builds the wheel matrix exactly once.
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build_wheels:
+    name: wheels ${{ matrix.os }} ${{ matrix.archs }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            archs: x86_64
+            label: linux-x86_64
+          # Native arm64 runner: builds and runs the full test suite at native
+          # speed, where QEMU emulation took the better part of an hour.
+          - os: ubuntu-24.04-arm
+            archs: aarch64
+            label: linux-aarch64
+          # One Apple Silicon job covers both macOS architectures: arm64
+          # builds and tests natively, x86_64 cross-compiles and tests under
+          # Rosetta 2. The Intel macos-13 runner (deprecated, slow) is gone.
+          - os: macos-latest
+            archs: arm64 x86_64
+            label: macos
+          - os: windows-latest
+            archs: AMD64
+            label: windows-amd64
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Gate on upstream wheel support
+        # Skips any CPython minor that not every runtime dependency ships
+        # wheels for; a new stable Python is adopted automatically once the
+        # last upstream publishes wheels. Emits CIBW_SKIP into the job env.
+        shell: bash
+        run: python3 scripts/ci/upstream_python_support.py
+
+      - name: Build wheels
+        # All build/test configuration (skips, test command, CMAKE_ARGS)
+        # lives in pyproject.toml [tool.cibuildwheel]; this workflow only
+        # selects the OS and archs.
+        # Full-SHA pin (strongest posture for the action that compiles the
+        # published binaries); Dependabot bumps it, and each bump brings any
+        # newly stable Pythons. cibuildwheel publishes no floating major tag.
+        uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084  # v3.4.1
+        env:
+          CIBW_ARCHS: ${{ matrix.archs }}
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-${{ matrix.label }}
+          path: wheelhouse/*.whl
+
+  build_sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build sdist
+        run: pipx run build --sdist
+
+      - name: Check sdist metadata
+        run: pipx run twine check dist/*.tar.gz
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: sdist
+          path: dist/*.tar.gz

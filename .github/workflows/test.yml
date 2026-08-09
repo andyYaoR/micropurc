@@ -1,0 +1,40 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # "3.x" is the newest stable CPython, so the matrix follows each release
+        # automatically; per-version coverage for every built wheel also runs
+        # inside cibuildwheel's test step.
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.x"]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package with dev extras
+        # Build isolation: scikit-build-core provisions cmake/ninja, and the
+        # runners ship with a C++ compiler. Eigen is fetched by CMake itself.
+        run: pip install ".[dev]"
+
+      - name: Run tests
+        run: pytest -m "not slow" -q
