@@ -62,6 +62,15 @@ the native engine evaluates without materializing ``(N, L, K)``.
     from micropurc import Network, compile_design
 
     net = Network.grid(rows=4, cols=4, K=3)
+    # Generate the attributes the spec names. ``length`` must be strictly
+    # positive because the spec takes its ``log``.
+    rng = np.random.default_rng(7)
+    net.Z = np.column_stack([
+        rng.uniform(1.0, 5.0, net.num_links),                # length
+        rng.uniform(1.0, 5.0, net.num_links),                # time
+        np.where(rng.random(net.num_links) < 0.4,
+                 rng.uniform(1.0, 3.0, net.num_links), 0.0), # toll
+    ])
     net.attribute_names = ["length", "time", "toll"]
 
     # Two income variants, one covariate column.

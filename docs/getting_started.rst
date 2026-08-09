@@ -46,7 +46,7 @@ declare a utility, and run the :class:`~micropurc.core.estimator.MicroPURCEstima
         od_uniform_all_pairs, MicroPURCEstimator, beta, attr, compile_design,
     )
 
-    # 1. A network with three standardized link attributes.
+    # 1. A network with three synthetic link attributes.
     net = Network.grid(rows=5, cols=5, K=3)
     net.attribute_names = ["length", "time", "toll"]
 

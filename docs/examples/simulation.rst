@@ -18,8 +18,11 @@ route sampler, and an origin-destination demand.
     net = Network.grid(rows=4, cols=4, K=3)
     net.attribute_names = ["length", "time", "toll"]
 
+    rng = np.random.default_rng(0)
     beta_true = np.array([1.0, 0.5, 0.8])
-    scale_m = net.Z[:, net.attribute_index("length")]
+    # The quadratic-perturbation scale must be strictly positive on every link;
+    # any positive per-link vector works.
+    scale_m = rng.uniform(0.5, 1.5, net.num_links)
     solver = PIQPFlowSolver(net, scale_m)
 
     dgp = DGP(
@@ -28,7 +31,7 @@ route sampler, and an origin-destination demand.
         forward_solver=solver,
         route_sampler=MarkovSampler(net),
         od_dist=od_uniform_all_pairs(net),
-        rng=np.random.default_rng(0),
+        rng=rng,
         config=DGPConfig(),
     )
     data = dgp.sample_dataset(n_trips=500)

@@ -1,17 +1,16 @@
 """End-to-end microPURC pipeline on a synthetic dataset.
 
 Runnable companion to ``docs/examples/pipeline.rst``. Builds a synthetic
-route-choice dataset on the Sioux Falls topology, then walks the whole
-pipeline: data selection, model specification, estimation, reporting, and
-reloading the archived run. Run it from anywhere::
+route-choice dataset on a grid network, then walks the whole pipeline: data
+selection, model specification, estimation, reporting, and reloading the
+archived run. It is self-contained — no data files are needed — so it runs
+anywhere after ``pip install micropurc``::
 
     python pipeline.py
 
 It writes a run archive under ``runs/`` in the current directory and prints
 the recovered coefficients (which match the known ``beta_true``).
 """
-
-import pathlib
 
 import numpy as np
 import scipy.sparse as sp
@@ -27,28 +26,25 @@ from micropurc import (
     beta,
     compile_design,
     log,
-    od_from_csv,
+    od_uniform_all_pairs,
 )
 from micropurc.config import EstimationConfig, SolverConfig
 from micropurc.reporting import RunWriter, load_run, render_fit_report
 
-HERE = pathlib.Path(__file__).resolve().parent
-NET_CSV = HERE / "data" / "siouxfalls_net.csv"
-TRIPS_CSV = HERE / "data" / "siouxfalls_trips.csv"
-
 
 def build_synthetic_network(seed: int = 7) -> tuple[Network, np.ndarray]:
-    """Load the benchmark topology and attach generated link attributes.
+    """Build a grid topology and attach generated link attributes.
 
     Returns the network (its ``Z`` holds ``tt``, ``toll``, ``scenic``) and a
     positive per-link perturbation scale.
     """
     rng = np.random.default_rng(seed)
-    net = Network.from_csv(str(NET_CSV), attribute_cols=["length", "tt"])
+    net = Network.grid(rows=6, cols=6, K=3)
     n_links = net.num_links
-    travel_time = net.Z[:, net.attribute_index("tt")].copy()
 
-    # Generated attributes: tolls on ~40% of links, and a scenic score.
+    # Generated attributes: positive travel times, tolls on ~40% of links,
+    # and a scenic score.
+    travel_time = rng.uniform(1.0, 5.0, n_links)
     toll = np.where(rng.random(n_links) < 0.4, rng.uniform(1.0, 3.0, n_links), 0.0)
     scenic = rng.normal(0.0, 1.0, n_links)
 
@@ -77,10 +73,7 @@ def main() -> None:
     solver = PIQPFlowSolver(
         net, scale_m, SolverConfig(backend="piqp", eps_abs=1e-10, eps_duality_gap_abs=1e-10)
     )
-    od = od_from_csv(
-        net, str(TRIPS_CSV), origin_col="origin", dest_col="destination",
-        weight_col="sampling_weight",
-    )
+    od = od_uniform_all_pairs(net)
     beta_true = np.array([0.5, 0.4, 0.3])
     dgp = DGP(
         network=net, beta_true=beta_true, forward_solver=solver,
@@ -97,7 +90,7 @@ def main() -> None:
     print(f"selection: kept {int(keep.sum())}/{keep.size} multi-link trips")
 
     # 5. Estimation.
-    est_cfg = EstimationConfig(max_iterations=200, fp_tol=1e-3, nm_window=3, nm_c=1e-4)
+    est_cfg = EstimationConfig(max_iterations=200, fp_tol=1e-3, nm_window=3)
     est = MicroPURCEstimator(network=net, forward_solver=solver, estimation_config=est_cfg)
     result = est.fit(y=y, b=b, beta_init=np.zeros(3))
     print(f"beta_true = {beta_true}")
@@ -106,7 +99,7 @@ def main() -> None:
 
     # 6. Reporting: archive config, data snapshot, estimates, and compute profile.
     writer = RunWriter(
-        "runs", "sioux_synthetic",
+        "runs", "grid_synthetic",
         config={"estimation": est_cfg, "beta_true": beta_true.tolist(), "seed": 1},
     )
     writer.snapshot_data(

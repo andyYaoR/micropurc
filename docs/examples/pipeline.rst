@@ -2,25 +2,28 @@ An end-to-end pipeline
 ======================
 
 This walkthrough runs the whole microPURC workflow on a **synthetic dataset**
-built from the Sioux Falls topology: generate link attributes, simulate
-observations at a known parameter vector, then select observations, specify a
-utility, estimate, archive the run, and reload it for analysis. Because the
-data are simulated at a known ``beta_true``, the recovered coefficients are a
-built-in correctness check.
+built on a grid network: generate link attributes, simulate observations at a
+known parameter vector, then select observations, specify a utility, estimate,
+archive the run, and reload it for analysis. Because the data are simulated at
+a known ``beta_true``, the recovered coefficients are a built-in correctness
+check.
 
 The runnable script for the main pipeline is :download:`pipeline.py
-<pipeline.py>`; run it from this ``docs/examples`` directory so the ``data/``
-paths below resolve. The snippets that follow mirror that script, plus one
-standalone aside on segmented models.
+<pipeline.py>`. It is self-contained -- no data files are needed -- so after
+``pip install micropurc`` it runs from any directory::
+
+    python pipeline.py
+
+The snippets that follow mirror that script, plus one standalone aside on
+segmented models and one on loading your own network data from CSV files.
 
 A synthetic network
 -------------------
 
-We load the benchmark topology and attach two *generated* link attributes -- a
-``toll`` on a subset of links and a ``scenic`` score -- alongside the real
-travel time ``tt``. A positive per-link ``scale_m`` sets the
-quadratic-perturbation scale; a uniform scale keeps it independent of the
-utility.
+We build a 6x6 grid topology and attach three *generated* link attributes: a
+positive travel time ``tt``, a ``toll`` on a subset of links, and a ``scenic``
+score. A positive per-link ``scale_m`` sets the quadratic-perturbation scale; a
+uniform scale keeps it independent of the utility.
 
 .. code-block:: python
 
@@ -28,10 +31,10 @@ utility.
     from micropurc import Network
 
     rng = np.random.default_rng(7)
-    net = Network.from_csv("data/siouxfalls_net.csv", attribute_cols=["length", "tt"])
+    net = Network.grid(rows=6, cols=6, K=3)
     n_links = net.num_links
-    travel_time = net.Z[:, net.attribute_index("tt")].copy()
 
+    travel_time = rng.uniform(1.0, 5.0, n_links)
     toll = np.where(rng.random(n_links) < 0.4, rng.uniform(1.0, 3.0, n_links), 0.0)
     scenic = rng.normal(0.0, 1.0, n_links)
 
@@ -88,20 +91,19 @@ Simulating observations
 ------------------------
 
 With the design installed, the :class:`~micropurc.simulation.dgp.DGP` draws
-trips at a known ``beta_true``. The Sioux Falls OD demand supplies the
-origin-destination distribution.
+trips at a known ``beta_true``. A uniform demand over all origin-destination
+pairs supplies the OD distribution.
 
 .. code-block:: python
 
-    from micropurc import PIQPFlowSolver, DGP, DGPConfig, MarkovSampler, od_from_csv
+    from micropurc import PIQPFlowSolver, DGP, DGPConfig, MarkovSampler, od_uniform_all_pairs
     from micropurc.config import SolverConfig
 
     solver = PIQPFlowSolver(
         net, scale_m,
         SolverConfig(backend="piqp", eps_abs=1e-10, eps_duality_gap_abs=1e-10),
     )
-    od = od_from_csv(net, "data/siouxfalls_trips.csv", origin_col="origin",
-                     dest_col="destination", weight_col="sampling_weight")
+    od = od_uniform_all_pairs(net)
 
     beta_true = np.array([0.5, 0.4, 0.3])
     dgp = DGP(network=net, beta_true=beta_true, forward_solver=solver,
@@ -138,10 +140,11 @@ diagnostics.
     est_cfg = EstimationConfig(max_iterations=200, fp_tol=1e-3, nm_window=3, nm_c=1e-4)
     est = MicroPURCEstimator(network=net, forward_solver=solver, estimation_config=est_cfg)
     result = est.fit(y=y, b=b, beta_init=np.zeros(3))
-    # beta_true = [0.5, 0.4, 0.3]  ->  beta_hat = [0.477, 0.418, 0.303]
+    # beta_true = [0.5, 0.4, 0.3]  ->  beta_hat = [0.482, 0.405, 0.297]
 
 The recovered coefficients sit within a few percent of ``beta_true`` at
-``n_trips=3000`` -- the simulate-then-estimate round trip closes.
+``n_trips=3000``, and the gap shrinks as ``n_trips`` grows -- the
+simulate-then-estimate round trip closes.
 
 Archiving the run
 -----------------
@@ -155,7 +158,7 @@ profile (see :doc:`reporting` for the full archive contents).
     import scipy.sparse as sp
     from micropurc.reporting import RunWriter
 
-    writer = RunWriter("runs", "sioux_synthetic",
+    writer = RunWriter("runs", "grid_synthetic",
                        config={"estimation": est_cfg, "beta_true": beta_true.tolist(), "seed": 1})
     writer.snapshot_data(edges=net.edges, Z=net.Z, A=sp.csc_matrix(net.A), scale_m=scale_m,
                          y=sp.csr_matrix(y), origins=origins, dests=dests)
@@ -184,4 +187,27 @@ subnetwork under the same dual-slack rule the estimator uses.
     render_fit_report(run, param_names=["b_time", "b_toll", "b_scenic"])
 
 Running the script end to end prints the recovered coefficients and writes the
-report to ``runs/sioux_synthetic/report.html``.
+report to ``runs/grid_synthetic/report.html``.
+
+Loading your own network data
+-----------------------------
+
+Real applications load the network and demand from files rather than
+generating them. :meth:`~micropurc.network.Network.from_csv` reads a link
+table (tail, head, and attribute columns) and
+:func:`~micropurc.demands.od_from_csv` reads a trip or OD-weight table. For a
+concrete file format, download the Sioux Falls benchmark files
+:download:`siouxfalls_net.csv <data/siouxfalls_net.csv>` and
+:download:`siouxfalls_trips.csv <data/siouxfalls_trips.csv>` and place them
+next to your script:
+
+.. code-block:: python
+
+    from micropurc import Network, od_from_csv
+
+    net = Network.from_csv("siouxfalls_net.csv", attribute_cols=["length", "tt"])
+    od = od_from_csv(net, "siouxfalls_trips.csv", origin_col="origin",
+                     dest_col="destination", weight_col="sampling_weight")
+
+Everything downstream -- specification, simulation, estimation, reporting --
+is identical to the grid pipeline above.
