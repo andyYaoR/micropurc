@@ -137,7 +137,7 @@ diagnostics.
     from micropurc import MicroPURCEstimator
     from micropurc.config import EstimationConfig
 
-    est_cfg = EstimationConfig(max_iterations=200, fp_tol=1e-3, nm_window=3, nm_c=1e-4)
+    est_cfg = EstimationConfig(max_iterations=200, fp_tol=1e-3, nm_window=3)
     est = MicroPURCEstimator(network=net, forward_solver=solver, estimation_config=est_cfg)
     result = est.fit(y=y, b=b, beta_init=np.zeros(3))
     # beta_true = [0.5, 0.4, 0.3]  ->  beta_hat = [0.482, 0.405, 0.297]
@@ -205,9 +205,9 @@ next to your script:
 
     from micropurc import Network, od_from_csv
 
-    net = Network.from_csv("siouxfalls_net.csv", attribute_cols=["length", "tt"])
-    od = od_from_csv(net, "siouxfalls_trips.csv", origin_col="origin",
-                     dest_col="destination", weight_col="sampling_weight")
+    net_csv = Network.from_csv("siouxfalls_net.csv", attribute_cols=["length", "tt"])
+    od_csv = od_from_csv(net_csv, "siouxfalls_trips.csv", origin_col="origin",
+                         dest_col="destination", weight_col="sampling_weight")
 
 Everything downstream -- specification, simulation, estimation, reporting --
 is identical to the grid pipeline above.
