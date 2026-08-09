@@ -73,3 +73,20 @@ declare a utility, and run the :class:`~micropurc.core.estimator.MicroPURCEstima
 
 See :doc:`examples/index` for complete, runnable examples of specifying a
 model, simulating data, and estimating parameters.
+
+Troubleshooting
+---------------
+
+**Silent crash on import (Windows, conda/Anaconda).** If ``import micropurc``
+exits the interpreter with no traceback (PowerShell shows exit code
+``-1073741819``), the environment has loaded an ``msvcp140.dll`` older than
+14.40 -- conda environments ship their own copy of the MSVC runtime, which
+shadows the system one, and extensions built by recent MSVC crash against it.
+Update the runtime in the affected environment::
+
+    conda install -c conda-forge "vc14_runtime>=14.40"
+
+Wheels built from current sources also carry two mitigations (a
+compatibility define for the pre-14.40 mutex layout, and a vendored copy of
+the runtime inside the wheel), so upcoming releases import cleanly even in
+environments with the older runtime.

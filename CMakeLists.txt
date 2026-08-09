@@ -159,6 +159,13 @@ else()
   # CMAKE_CXX_FLAGS_RELEASE for MSVC already contains /O2 /Ob2 /DNDEBUG
   # (see Modules/Platform/Windows-MSVC.cmake). Adding /O2 here again would
   # be redundant and risk duplicate-flag warnings.
+  #
+  # Binaries built by MSVC 17.10+ crash with a silent access violation when
+  # the process has already loaded an msvcp140.dll older than 14.40 -- conda
+  # environments ship their own copy that shadows the system one. The define
+  # restores the pre-17.10 std::mutex layout so the extension also runs
+  # against those older runtimes.
+  target_compile_definitions(_native PRIVATE _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
 endif()
 
 # Install into the micropurc package directory.
