@@ -86,7 +86,10 @@ Update the runtime in the affected environment::
 
     conda install -c conda-forge "vc14_runtime>=14.40"
 
-From 0.1.1 on, the wheels link the MSVC runtime statically and load no
-``msvcp140.dll`` at all, so they import cleanly regardless of the
-environment's runtime version; the fix above is only needed for the 0.1.0
-wheels.
+From 0.1.1 on, micropurc's own extension links the MSVC runtime statically
+and loads no ``msvcp140.dll`` at all, so it is immune to the runtime
+version. The interpreter can still crash the same way inside a
+*dependency's* extension module -- observed with ``piqp``, whose wheels
+link the runtime dynamically -- and the ``conda install`` above cures those
+too. Bisect with ``python -c "import piqp"`` if unsure where the crash
+lives.

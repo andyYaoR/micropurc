@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-import piqp
 import scipy.sparse as sp
 
 from ..config import SolverConfig
@@ -57,6 +56,12 @@ class PIQPFlowSolver:
 
         self._x_l = np.zeros((L, 1), dtype=np.float64)
         self._x_u = np.full((L, 1), np.inf, dtype=np.float64)
+
+        # Deferred so that a broken piqp extension (for example one that
+        # crashes against an outdated MSVC runtime) cannot take down
+        # ``import micropurc``; the failure then surfaces here, where PIQP is
+        # actually needed.
+        import piqp
 
         self._solver = piqp.SparseSolver()
         s = self._solver.settings
