@@ -16,7 +16,9 @@ pip install micropurc
 
 Pre-built wheels cover Linux (x86_64, aarch64), macOS (x86_64, arm64), and
 Windows (AMD64) for Python 3.10 and newer; new stable Python releases are
-picked up automatically.
+picked up automatically. On Windows we recommend installing inside
+[WSL](https://learn.microsoft.com/windows/wsl/): the Linux wheels' compiled
+kernels are typically faster, and it is the configuration we test most.
 
 ### Building from source
 

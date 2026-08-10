@@ -1,98 +1,88 @@
-Getting started
-===============
+# microPURC
 
-Installation
-------------
+A Python package for estimating the perturbed utility route choice (microPURC)
+model from trip-level data. It accompanies the paper:
 
-::
+> M. Fosgerau, N. Nielsen, T. Rasmussen, and R. Yao.
+> *Estimating the perturbed utility route choice model with trip-level data.*
 
-    pip install micropurc
+📖 **Documentation:** https://andyyaor.github.io/micropurc/
+
+## Installation
+
+```bash
+pip install micropurc
+```
 
 Pre-built wheels cover Linux (x86_64, aarch64), macOS (x86_64, arm64), and
 Windows (AMD64) for Python 3.10 and newer; new stable Python releases are
-picked up automatically.
+picked up automatically. On Windows we recommend installing inside
+[WSL](https://learn.microsoft.com/windows/wsl/): the Linux wheels' compiled
+kernels are typically faster, and it is the configuration we test most.
 
-Building from source
-~~~~~~~~~~~~~~~~~~~~
+### Building from source
 
-``micropurc`` builds a small C++ extension via scikit-build-core, so a source
-build needs a C++ compiler and CMake; Eigen is fetched automatically when it is
-not found on the system. From a checkout::
+A source build compiles a small C++ extension and needs a C++ compiler and
+CMake (Eigen is fetched automatically when it is not found on the system):
 
-    pip install -e .
+- **macOS** — `xcode-select --install`, then `brew install cmake`
+- **Linux** — `sudo apt install build-essential cmake` (or the equivalent)
+- **Windows** — Visual Studio Build Tools (the "Desktop development with C++"
+  workload) and CMake
 
-For a development environment with the test, lint, and docs tools::
+```bash
+pip install -e .
+```
 
-    ./scripts/dev_setup.sh
+The development tools (tests, linting, docs) install via `./scripts/dev_setup.sh`.
 
-Requirements
-------------
+## Quick start
 
-The runtime dependencies are NumPy, SciPy, pandas, and networkx. PIQP, which
-solves the forward quadratic programs, is compiled into the package's native
-extension from the vendored sources in ``extern/piqp``, so it needs no
-separate installation. Documentation and linting tools live in the ``docs``
-and ``dev`` optional-dependency groups; the ``dev`` group also installs the
-``piqp`` Python package, which the test suite uses as an independent
-equivalence oracle for the compiled-in solver.
+```python
+import numpy as np
+from micropurc import (
+    Network, PIQPFlowSolver, DGP, DGPConfig, MarkovSampler,
+    od_uniform_all_pairs, MicroPURCEstimator,
+)
 
-A first estimation
-------------------
+# A 5x5 grid; its links carry three synthetic attributes (nonnegative, unit variance).
+net = Network.grid(rows=5, cols=5, K=3)
+net.attribute_names = ["length", "time", "toll"]
+scale_m = np.ones(net.num_links)          # quadratic-perturbation scale
+solver = PIQPFlowSolver(net, scale_m)
 
-The workflow has three parts: build a :class:`~micropurc.network.Network`,
-declare a utility, and run the :class:`~micropurc.core.estimator.MicroPURCEstimator`.
+# Simulate trips at a known beta, then recover it.
+dgp = DGP(network=net, beta_true=np.array([1.0, 0.5, 0.8]),
+          forward_solver=solver, route_sampler=MarkovSampler(net),
+          od_dist=od_uniform_all_pairs(net), rng=np.random.default_rng(1),
+          config=DGPConfig())
+data = dgp.sample_dataset(n_trips=20000)
 
-.. code-block:: python
+est = MicroPURCEstimator(net, solver)
+result = est.fit(y=data["y"], b=data["b"], beta_init=np.zeros(3))
+print(result["beta_hat"], result["diagnostics"]["converged"])
+# -> [0.993 0.498 0.798] True   (recovers beta_true; N=20000 -> ~0.01 sampling error)
+```
 
-    import numpy as np
-    from micropurc import (
-        Network, PIQPFlowSolver, DGP, DGPConfig, MarkovSampler,
-        od_uniform_all_pairs, MicroPURCEstimator, beta, attr, compile_design,
-    )
+## Documentation and examples
 
-    # 1. A network with three synthetic link attributes.
-    net = Network.grid(rows=5, cols=5, K=3)
-    net.attribute_names = ["length", "time", "toll"]
+Full documentation is hosted at
+**https://andyyaor.github.io/micropurc/**:
 
-    # 2. A utility over those attributes, declared with the model-spec DSL.
-    spec = (beta("b_length") * attr("length")
-            + beta("b_time") * attr("time")
-            + beta("b_toll") * attr("toll")).to_spec()
-    net.Z = compile_design(spec, net).Z          # install the compiled design
+- [Getting started](https://andyyaor.github.io/micropurc/getting_started.html)
+- [Examples](https://andyyaor.github.io/micropurc/examples/index.html) —
+  end-to-end pipeline, model specification, simulation, and run reporting
+- [API reference](https://andyyaor.github.io/micropurc/api/index.html)
 
-    # 3. The forward solver and the estimator.
-    scale_m = np.ones(net.num_links)             # quadratic-perturbation scale
-    solver = PIQPFlowSolver(net, scale_m)
-    est = MicroPURCEstimator(net, solver)
+Also in this repo: `scripts/paper/` holds the paper's simulation experiments
+(the network data ships in the repository), `pytest` runs the test suite, and
+`make -C docs html` builds the docs locally.
 
-    # Simulate data at a known beta and recover it.
-    dgp = DGP(network=net, beta_true=np.array([1.0, 0.5, 0.8]),
-              forward_solver=solver, route_sampler=MarkovSampler(net),
-              od_dist=od_uniform_all_pairs(net), rng=np.random.default_rng(1),
-              config=DGPConfig())
-    data = dgp.sample_dataset(n_trips=20000)
-    result = est.fit(y=data["y"], b=data["b"], beta_init=np.zeros(3))
-    print(result["beta_hat"], result["diagnostics"]["converged"])
-    # -> [0.993 0.498 0.798] True   (recovers beta_true; N=20000 -> ~0.01 sampling error)
+## Citing
 
-See :doc:`examples/index` for complete, runnable examples of specifying a
-model, simulating data, and estimating parameters.
-
-Troubleshooting
----------------
-
-**Silent crash on import (Windows, conda/Anaconda).** If ``import micropurc``
-exits the interpreter with no traceback (PowerShell shows exit code
-``-1073741819``), the environment has loaded an ``msvcp140.dll`` older than
-14.40 -- conda environments ship their own copy of the MSVC runtime, which
-shadows the system one, and extensions built by recent MSVC crash against it.
-Update the runtime in the affected environment::
-
-    conda install -c conda-forge "vc14_runtime>=14.40"
-
-From 0.1.1 on, micropurc's own extension links the MSVC runtime statically
-and loads no ``msvcp140.dll`` at all, so it is immune to the runtime
-version. The interpreter can still crash the same way inside a
-*dependency's* extension module, and the ``conda install`` above cures those
-too. Bisect by importing the dependencies one at a time if unsure where the
-crash lives.
+If you use microPURC, please cite the paper above; citation metadata is in
+[`CITATION.cff`](CITATION.cff). The forward route-choice quadratic programs are
+solved with [PIQP](https://github.com/PREDICT-EPFL/piqp) (Schwan et al., 2023),
+whose C++ sources are vendored in `extern/piqp` and compiled into the native
+extension under its BSD-2-Clause license; no separate PIQP installation is
+needed.
