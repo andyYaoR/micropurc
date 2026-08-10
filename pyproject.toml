@@ -32,10 +32,13 @@ classifiers = [
     "Operating System :: OS Independent",
     "Topic :: Scientific/Engineering",
 ]
+# PIQP is deliberately absent: the solver is the vendored PIQP C++ library in
+# extern/piqp, compiled into the native extension, so an installed `piqp`
+# Python package is never imported at runtime. It stays a dev/test dependency,
+# where it serves as the independent equivalence oracle.
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
-    "piqp>=0.4",
     "networkx>=3.0",
     "pandas>=1.5",
 ]
@@ -54,6 +57,12 @@ dev = [
     "pre-commit>=3.5",
     "pydocstyle>=6.3",
     "darglint>=1.8",
+    # Equivalence oracle only. tests/test_forward_solver_native.py re-solves the
+    # forward QP through this independently built PIQP and compares it with the
+    # vendored PIQP compiled into the extension. Tests needing it are marked
+    # `oracle` and skip when it is absent, so wheel-test environments (which do
+    # not install it) stay green.
+    "piqp>=0.4",
 ]
 docs = [
     "sphinx>=7.0",
@@ -121,6 +130,7 @@ testpaths = ["tests"]
 markers = [
     "requires_data: needs external data files not bundled with the repository",
     "slow: long-running tests",
+    "oracle: compares against the pip `piqp` package; skipped when it is absent",
 ]
 
 [tool.ruff]
