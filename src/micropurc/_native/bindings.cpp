@@ -1907,6 +1907,157 @@ static nb::tuple batch_solve_and_accumulate(
                           ahash_arr_out);
 }
 
+#ifdef HAVE_PIQP
+// Termination settings, mapped one-to-one from the Python SolverConfig. Kept as
+// a value type on the solver so a caller can read back exactly what the solver
+// was configured with.
+struct NativeSolverSettings {
+    bool verbose;
+    double eps_abs;
+    double eps_duality_gap_abs;
+    double eps_rel;
+    double eps_duality_gap_rel;
+    int max_iter;
+};
+
+// Persistent single-right-hand-side forward QP solver:
+//
+//   min_x  c'x + 0.5 x' diag(scale_m) x   s.t.   A x = b,   x >= 0,
+//
+// with no upper bound on x. The sparsity pattern of A and of diag(scale_m) is
+// fixed at construction and PIQP is set up exactly once, so each solve(c, b)
+// updates only those two vectors and reuses the symbolic factorization; the
+// solver object carries its own state across calls.
+//
+// The upper bound is passed as +infinity rather than omitted, which is the same
+// problem: PIQP stores only the entries of x_u strictly below its infinity
+// marker, so an all-infinite x_u leaves zero upper-bound rows in the data.
+//
+// solve() releases the GIL, so one instance serves one thread at a time: the
+// (c, b) buffers and PIQP's own workspace are per-instance mutable state.
+// Concurrent callers need one instance each, which is what the parallel batch
+// entry points do internally.
+class NativeSparseSolver {
+   public:
+    NativeSparseSolver(nb::ndarray<int64_t, nb::shape<-1>, nb::c_contig> A_indptr_arr,
+                       nb::ndarray<int64_t, nb::shape<-1>, nb::c_contig> A_indices_arr,
+                       nb::ndarray<double, nb::shape<-1>, nb::c_contig> A_data_arr,
+                       nb::ndarray<double, nb::shape<-1>, nb::c_contig> scale_m_arr, int V_in,
+                       int L_in, bool verbose, double eps_abs, double eps_duality_gap_abs,
+                       double eps_rel, double eps_duality_gap_rel, int max_iter)
+        : V(V_in), L(L_in), P_eigen(L_in, L_in), A_eigen(V_in, L_in) {
+        if (V <= 0 || L <= 0)
+            throw std::invalid_argument("NativeSparseSolver needs V > 0 and L > 0");
+        if ((int64_t)A_indptr_arr.shape(0) != (int64_t)L + 1)
+            throw std::invalid_argument("A_indptr must have length L + 1");
+        if ((int64_t)scale_m_arr.shape(0) != (int64_t)L)
+            throw std::invalid_argument("scale_m must have length L");
+
+        const int64_t *indptr = A_indptr_arr.data();
+        const int64_t *indices = A_indices_arr.data();
+        const double *data = A_data_arr.data();
+        const double *scale_m = scale_m_arr.data();
+
+        int64_t nnz = indptr[L];
+        if (indptr[0] != 0)
+            throw std::invalid_argument("A_indptr must start at 0 (CSC of an (V, L) matrix)");
+        if ((int64_t)A_indices_arr.shape(0) != nnz || (int64_t)A_data_arr.shape(0) != nnz)
+            throw std::invalid_argument("A_indices and A_data must have length A_indptr[L]");
+        for (int64_t p = 0; p < nnz; p++)
+            if (indices[p] < 0 || indices[p] >= V)
+                throw std::invalid_argument("A_indices entry outside [0, V)");
+
+        std::vector<Eigen::Triplet<double>> p_trips;
+        p_trips.reserve(L);
+        for (int j = 0; j < L; j++) p_trips.push_back({j, j, scale_m[j]});
+        P_eigen.setFromTriplets(p_trips.begin(), p_trips.end());
+
+        std::vector<Eigen::Triplet<double>> a_trips;
+        a_trips.reserve((size_t)nnz);
+        for (int j = 0; j < L; j++)
+            for (int64_t p = indptr[j]; p < indptr[j + 1]; p++)
+                a_trips.push_back({(int)indices[p], j, data[p]});
+        A_eigen.setFromTriplets(a_trips.begin(), a_trips.end());
+
+        settings_.verbose = verbose;
+        settings_.eps_abs = eps_abs;
+        settings_.eps_duality_gap_abs = eps_duality_gap_abs;
+        settings_.eps_rel = eps_rel;
+        settings_.eps_duality_gap_rel = eps_duality_gap_rel;
+        settings_.max_iter = max_iter;
+
+        solver_.settings().verbose = verbose;
+        solver_.settings().eps_abs = eps_abs;
+        solver_.settings().eps_duality_gap_abs = eps_duality_gap_abs;
+        solver_.settings().eps_rel = eps_rel;
+        solver_.settings().eps_duality_gap_rel = eps_duality_gap_rel;
+        solver_.settings().max_iter = max_iter;
+        // Timings are not part of the reported diagnostics, and false is also
+        // PIQP's own default.
+        solver_.settings().compute_timings = false;
+
+        c_vec = Eigen::VectorXd::Zero(L);
+        b_vec = Eigen::VectorXd::Zero(V);
+        x_lower = Eigen::VectorXd::Zero(L);
+        x_upper = Eigen::VectorXd::Constant(L, std::numeric_limits<double>::infinity());
+
+        solver_.setup(P_eigen, c_vec, A_eigen, b_vec, piqp::nullopt, piqp::nullopt, piqp::nullopt,
+                      x_lower, x_upper);
+    }
+
+    // Update (c, b) on the set-up problem and solve it.
+    // Returns (x (L,), y (V,), info), where y holds the equality-constraint
+    // duals as PIQP reports them.
+    nb::tuple solve(nb::ndarray<double, nb::shape<-1>, nb::c_contig> c_arr,
+                    nb::ndarray<double, nb::shape<-1>, nb::c_contig> b_arr) {
+        if ((int64_t)c_arr.shape(0) != (int64_t)L)
+            throw std::invalid_argument("c must have length L");
+        if ((int64_t)b_arr.shape(0) != (int64_t)V)
+            throw std::invalid_argument("b must have length V");
+
+        std::memcpy(c_vec.data(), c_arr.data(), sizeof(double) * (size_t)L);
+        std::memcpy(b_vec.data(), b_arr.data(), sizeof(double) * (size_t)V);
+
+        piqp::Status status;
+        {
+            // The solve touches no Python object, so other threads can run.
+            nb::gil_scoped_release release;
+            solver_.update(piqp::nullopt, c_vec, piqp::nullopt, b_vec);
+            status = solver_.solve();
+        }
+
+        const auto &res = solver_.result();
+        double *x = new double[L];
+        double *y = new double[V];
+        std::memcpy(x, res.x.data(), sizeof(double) * (size_t)L);
+        std::memcpy(y, res.y.data(), sizeof(double) * (size_t)V);
+        nb::capsule x_owner(x, [](void *p) noexcept { delete[] (double *)p; });
+        nb::capsule y_owner(y, [](void *p) noexcept { delete[] (double *)p; });
+        size_t x_shape[1] = {(size_t)L};
+        size_t y_shape[1] = {(size_t)V};
+        auto x_out = nb::ndarray<nb::numpy, double>(x, 1, x_shape, x_owner);
+        auto y_out = nb::ndarray<nb::numpy, double>(y, 1, y_shape, y_owner);
+
+        nb::dict info;
+        info["status"] = status;
+        info["iter"] = (int64_t)res.info.iter;
+        info["primal_residual"] = res.info.primal_res;
+        info["dual_residual"] = res.info.dual_res;
+        info["duality_gap"] = res.info.duality_gap;
+
+        return nb::make_tuple(x_out, y_out, info);
+    }
+
+    NativeSolverSettings settings_;
+
+   private:
+    int V, L;
+    Eigen::SparseMatrix<double, Eigen::ColMajor, int> P_eigen, A_eigen;
+    Eigen::VectorXd c_vec, b_vec, x_lower, x_upper;
+    PIQPSolver solver_;
+};
+#endif
+
 // Parallel forward-QP batch solve (flows only).
 // Solves U independent unit-demand OD flow problems in parallel and returns the
 // (U, L) optimal-flow matrix. This is the forward solver the DGP uses to
@@ -2146,6 +2297,47 @@ NB_MODULE(_native, m) {
           "Compute one Schur contribution via the native C++ implementation.");
 
 #ifdef HAVE_PIQP
+    nb::enum_<piqp::Status>(m, "Status", nb::is_arithmetic(),
+                            "Solver status codes, mirroring the PIQP C++ enum.")
+        .value("PIQP_SOLVED", piqp::PIQP_SOLVED)
+        .value("PIQP_MAX_ITER_REACHED", piqp::PIQP_MAX_ITER_REACHED)
+        .value("PIQP_PRIMAL_INFEASIBLE", piqp::PIQP_PRIMAL_INFEASIBLE)
+        .value("PIQP_DUAL_INFEASIBLE", piqp::PIQP_DUAL_INFEASIBLE)
+        .value("PIQP_NUMERICS", piqp::PIQP_NUMERICS)
+        .value("PIQP_UNSOLVED", piqp::PIQP_UNSOLVED)
+        .value("PIQP_INVALID_SETTINGS", piqp::PIQP_INVALID_SETTINGS);
+
+    nb::class_<NativeSolverSettings>(m, "NativeSolverSettings",
+                                     "Termination settings a NativeSparseSolver was built with.")
+        .def_ro("verbose", &NativeSolverSettings::verbose)
+        .def_ro("eps_abs", &NativeSolverSettings::eps_abs)
+        .def_ro("eps_duality_gap_abs", &NativeSolverSettings::eps_duality_gap_abs)
+        .def_ro("eps_rel", &NativeSolverSettings::eps_rel)
+        .def_ro("eps_duality_gap_rel", &NativeSolverSettings::eps_duality_gap_rel)
+        .def_ro("max_iter", &NativeSolverSettings::max_iter);
+
+    nb::class_<NativeSparseSolver>(m, "NativeSparseSolver")
+        .def(nb::init<nb::ndarray<int64_t, nb::shape<-1>, nb::c_contig>,
+                      nb::ndarray<int64_t, nb::shape<-1>, nb::c_contig>,
+                      nb::ndarray<double, nb::shape<-1>, nb::c_contig>,
+                      nb::ndarray<double, nb::shape<-1>, nb::c_contig>, int, int, bool, double,
+                      double, double, double, int>(),
+             nb::arg("A_indptr"), nb::arg("A_indices"), nb::arg("A_data"), nb::arg("scale_m"),
+             nb::arg("V"), nb::arg("L"), nb::arg("verbose"), nb::arg("eps_abs"),
+             nb::arg("eps_duality_gap_abs"), nb::arg("eps_rel"), nb::arg("eps_duality_gap_rel"),
+             nb::arg("max_iter"),
+             "Set up one forward QP over the CSC equality matrix A (V x L) and the\n"
+             "diagonal perturbation diag(scale_m):\n\n"
+             "  min_x  c'x + 0.5 x' diag(scale_m) x   s.t.  A x = b,  x >= 0,\n\n"
+             "with no upper bound on x. The setup runs once; solve(c, b) then only\n"
+             "updates the two vectors.")
+        .def("solve", &NativeSparseSolver::solve, nb::arg("c"), nb::arg("b"),
+             "Update (c, b) and solve.\n\n"
+             "Returns (x (L,) float64, y (V,) float64 equality duals, info dict with\n"
+             "status, iter, primal_residual, dual_residual, duality_gap).")
+        .def_ro("settings", &NativeSparseSolver::settings_,
+                "Termination settings this solver was constructed with.");
+
     nb::class_<NativePIQPContext>(m, "NativePIQPContext")
         .def(nb::init<nb::ndarray<int64_t, nb::shape<-1>, nb::c_contig>,
                       nb::ndarray<int64_t, nb::shape<-1>, nb::c_contig>,

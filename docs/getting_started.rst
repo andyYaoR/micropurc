@@ -28,9 +28,13 @@ For a development environment with the test, lint, and docs tools::
 Requirements
 ------------
 
-The runtime dependencies are NumPy, SciPy, pandas, networkx, and PIQP (the
-default forward solver). Documentation and linting tools live in the ``docs``
-and ``dev`` optional-dependency groups.
+The runtime dependencies are NumPy, SciPy, pandas, and networkx. PIQP, which
+solves the forward quadratic programs, is compiled into the package's native
+extension from the vendored sources in ``extern/piqp``, so it needs no
+separate installation. Documentation and linting tools live in the ``docs``
+and ``dev`` optional-dependency groups; the ``dev`` group also installs the
+``piqp`` Python package, which the test suite uses as an independent
+equivalence oracle for the compiled-in solver.
 
 A first estimation
 ------------------
@@ -89,7 +93,6 @@ Update the runtime in the affected environment::
 From 0.1.1 on, micropurc's own extension links the MSVC runtime statically
 and loads no ``msvcp140.dll`` at all, so it is immune to the runtime
 version. The interpreter can still crash the same way inside a
-*dependency's* extension module -- observed with ``piqp``, whose wheels
-link the runtime dynamically -- and the ``conda install`` above cures those
-too. Bisect with ``python -c "import piqp"`` if unsure where the crash
-lives.
+*dependency's* extension module, and the ``conda install`` above cures those
+too. Bisect by importing the dependencies one at a time if unsure where the
+crash lives.

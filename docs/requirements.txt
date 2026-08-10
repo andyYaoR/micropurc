@@ -1,6 +1,6 @@
 # Dependencies for building the documentation without compiling the native
 # extension. The runtime libraries below are imported by autodoc; the compiled
-# module (micropurc._native) and PIQP are mocked in conf.py.
+# module (micropurc._native), which carries PIQP, is mocked in conf.py.
 sphinx>=7.0
 furo>=2024.0
 sphinx-autodoc-typehints>=2.0

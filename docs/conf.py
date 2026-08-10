@@ -55,9 +55,10 @@ autodoc_default_options = {
 }
 autodoc_typehints = "description"
 
-# The compiled extension (and the PIQP backend) are not importable in the docs
-# build environment; mock them so autodoc can import the pure-Python modules.
-autodoc_mock_imports = ["micropurc._native", "piqp"]
+# The compiled extension, which carries the PIQP backend, is not importable in
+# the docs build environment; mock it so autodoc can import the pure-Python
+# modules.
+autodoc_mock_imports = ["micropurc._native"]
 
 autosummary_generate = True
 

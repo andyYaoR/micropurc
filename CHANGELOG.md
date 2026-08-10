@@ -14,6 +14,22 @@ and this project adheres to
   `PIQPFlowSolver` is constructed, so a piqp extension that cannot load (for
   example against an outdated MSVC runtime) no longer prevents importing the
   package.
+- `PIQPFlowSolver.solve` now runs through the PIQP C++ library vendored in
+  `extern/piqp` and compiled into the native extension, which every other
+  solve path already used. The problem, the settings taken from
+  `SolverConfig`, and the `FlowResult` contract are unchanged; the single and
+  batch entry points now produce identical flows at the default configuration.
+- The `piqp` Python package is no longer a runtime dependency. It moved to the
+  `dev` optional-dependency group, where the test suite uses it as an
+  independent equivalence oracle for the compiled-in solver
+  (`tests/test_forward_solver_native.py`, marker `oracle`).
+
+### Added
+
+- `micropurc._native.NativeSparseSolver`: a persistent single-right-hand-side
+  forward QP solver, set up once per network and updated per solve, returning
+  flows, equality duals, and PIQP's status, iteration count, residuals, and
+  duality gap.
 
 ## [0.1.1] - 2026-08-10
 

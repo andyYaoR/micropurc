@@ -28,7 +28,9 @@ Acknowledgments
 ---------------
 
 The forward route-choice quadratic programs are solved with `PIQP
-<https://github.com/PREDICT-EPFL/piqp>`_ (Schwan et al., 2023).
+<https://github.com/PREDICT-EPFL/piqp>`_ (Schwan et al., 2023), whose C++
+sources are vendored and compiled into micropurc's native extension under its
+BSD-2-Clause license.
 
 Indices
 -------

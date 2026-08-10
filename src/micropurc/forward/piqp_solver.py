@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-import scipy.sparse as sp
 
 from ..config import SolverConfig
 from ..network import Network
@@ -20,10 +19,19 @@ class PIQPFlowSolver:
         \min_x \; c^{\top} x
         + \tfrac12 x^{\top} \mathrm{diag}(\mathrm{scale}_m) x
         \quad \text{s.t.} \quad
-        A x = b, \; x \ge 0 .
+        A x = b, \; x \ge 0 ,
+
+    with no upper bound on :math:`x`.
 
     The sparsity structure is fixed at construction, and each :meth:`solve`
     updates only :math:`c` and :math:`b`, so one PIQP setup serves every trip.
+    PIQP is compiled into the package's native extension, so no separate PIQP
+    installation is involved.
+
+    One instance carries one solver state, and :meth:`solve` releases the GIL
+    while that state is being written, so an instance serves one thread at a
+    time. Give each thread its own solver, or use :meth:`solve_batch`, which
+    runs a solver per worker internally.
     """
 
     def __init__(
@@ -52,39 +60,26 @@ class PIQPFlowSolver:
             raise ValueError(f"scale_m has length {L}, but network has {network.num_links} links.")
 
         self._A_eq = network.A.astype(np.float64).tocsc()
-        self._P = sp.diags(self._scale_m, format="csc", dtype=np.float64)
 
-        self._x_l = np.zeros((L, 1), dtype=np.float64)
-        self._x_u = np.full((L, 1), np.inf, dtype=np.float64)
+        # Deferred so that a native extension that fails to load (for example
+        # one built against an outdated MSVC runtime) cannot take down
+        # ``import micropurc``; the failure then surfaces here, where the
+        # solver is actually needed.
+        from .._native import NativeSparseSolver
 
-        # Deferred so that a broken piqp extension (for example one that
-        # crashes against an outdated MSVC runtime) cannot take down
-        # ``import micropurc``; the failure then surfaces here, where PIQP is
-        # actually needed.
-        import piqp
-
-        self._solver = piqp.SparseSolver()
-        s = self._solver.settings
-        s.verbose = cfg.verbose
-        s.eps_abs = cfg.eps_abs
-        s.eps_duality_gap_abs = cfg.eps_duality_gap_abs
-        s.eps_rel = cfg.eps_rel
-        s.eps_duality_gap_rel = cfg.eps_duality_gap_rel
-        s.max_iter = cfg.max_iter
-
-        c0 = np.zeros((L, 1), dtype=np.float64)
-        b0 = np.zeros((self._A_eq.shape[0], 1), dtype=np.float64)
-
-        self._solver.setup(
-            self._P,
-            c=c0,
-            A=self._A_eq,
-            b=b0,
-            G=None,
-            h_l=None,
-            h_u=None,
-            x_l=self._x_l,
-            x_u=self._x_u,
+        self._solver = NativeSparseSolver(
+            A_indptr=self._A_eq.indptr.astype(np.int64),
+            A_indices=self._A_eq.indices.astype(np.int64),
+            A_data=np.ascontiguousarray(self._A_eq.data, dtype=np.float64),
+            scale_m=self._scale_m,
+            V=int(self._A_eq.shape[0]),
+            L=L,
+            verbose=bool(cfg.verbose),
+            eps_abs=float(cfg.eps_abs),
+            eps_duality_gap_abs=float(cfg.eps_duality_gap_abs),
+            eps_rel=float(cfg.eps_rel),
+            eps_duality_gap_rel=float(cfg.eps_duality_gap_rel),
+            max_iter=int(cfg.max_iter),
         )
 
     @property
@@ -103,33 +98,18 @@ class PIQPFlowSolver:
         Args:
             c: Link cost vector, shape (L,).
             b: Node imbalance vector, shape (V,).
-            warm: Unused; PIQP manages its own warm start across calls.
+            warm: Unused; PIQP manages its own state across calls.
 
         Returns:
-            The optimal flows, the equality duals, and whatever solver
-            diagnostics the backend exposes.
+            The optimal flows, the equality duals, and the solver diagnostics
+            (status, iteration count, residuals, duality gap).
         """
-        c_vec = np.asarray(c, dtype=np.float64).reshape(-1, 1)
-        b_vec = np.asarray(b, dtype=np.float64).reshape(-1, 1)
+        c_vec = np.ascontiguousarray(c, dtype=np.float64).ravel()
+        b_vec = np.ascontiguousarray(b, dtype=np.float64).ravel()
 
-        self._solver.update(c=c_vec, b=b_vec)
-        self._solver.solve()
-
-        result = self._solver.result
-        # .copy() is load-bearing: PIQP reuses one internal result buffer, so a
-        # view of it would be overwritten by the next solve.
-        x_star = np.asarray(result.x, dtype=np.float64).ravel().copy()
-
-        lam_eq = None
-        if hasattr(result, "y"):
-            lam_eq = np.asarray(result.y, dtype=np.float64).ravel().copy()
-
-        info: dict[str, Any] = {}
-        if hasattr(result, "info"):
-            info_obj = result.info
-            for attr in ("status", "iter", "primal_residual", "dual_residual", "duality_gap"):
-                if hasattr(info_obj, attr):
-                    info[attr] = getattr(info_obj, attr)
+        # Each call returns freshly allocated arrays, so a previous result is
+        # never overwritten by the next solve.
+        x_star, lam_eq, info = self._solver.solve(c_vec, b_vec)
 
         return FlowResult(x=x_star, lam_eq=lam_eq, info=info)
 
@@ -144,13 +124,14 @@ class PIQPFlowSolver:
 
         Every OD shares the cost ``c`` and differs only in the node-imbalance
         right-hand side (-1 at the origin, +1 at the destination), which the
-        native multi-threaded batch solver exploits. Each OD's flows agree with
-        :meth:`solve`.
+        native multi-threaded batch solver exploits. Both entry points run the
+        same solver on the same problem, so each OD's flows agree with
+        :meth:`solve` up to the two paths' termination settings.
 
-        The native path takes ``eps_abs``, ``eps_duality_gap_abs``, and
-        ``max_iter`` from ``config`` and leaves the relative termination
-        criteria at PIQP's own defaults, so zeroing ``eps_rel`` in ``config``
-        leaves this path unaffected.
+        This path takes ``eps_abs``, ``eps_duality_gap_abs``, and ``max_iter``
+        from ``config`` and leaves the relative termination criteria at PIQP's
+        own defaults, so zeroing ``eps_rel`` in ``config`` leaves this path
+        unaffected and only :meth:`solve` tightens.
 
         Args:
             c: Shared link cost vector, shape (L,).

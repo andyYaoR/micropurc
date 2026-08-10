@@ -81,4 +81,6 @@ Also in this repo: `scripts/paper/` holds the paper's simulation experiments
 If you use microPURC, please cite the paper above; citation metadata is in
 [`CITATION.cff`](CITATION.cff). The forward route-choice quadratic programs are
 solved with [PIQP](https://github.com/PREDICT-EPFL/piqp) (Schwan et al., 2023),
-which the pre-built wheels bundle under its BSD-2-Clause license.
+whose C++ sources are vendored in `extern/piqp` and compiled into the native
+extension under its BSD-2-Clause license; no separate PIQP installation is
+needed.
