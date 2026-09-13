@@ -51,7 +51,7 @@ jobs:
         # Full-SHA pin (strongest posture for the action that compiles the
         # published binaries); Dependabot bumps it, and each bump brings any
         # newly stable Pythons. cibuildwheel publishes no floating major tag.
-        uses: pypa/cibuildwheel@8d2b08b68458a16aeb24b64e68a09ab1c8e82084  # v3.4.1
+        uses: pypa/cibuildwheel@e090b81e30c4d855ea63bf4b6e59204c09a101ae  # v4.2.1
         env:
           CIBW_ARCHS: ${{ matrix.archs }}
 
