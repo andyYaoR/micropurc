@@ -234,3 +234,194 @@ bool accumulate_trip_sparse(const int *active_idx, int n_active, int m_rows, int
     return schur_contribution(Z_act, A_local, w_y_buf.data(), w_r_ptr, n_active, m_rows, K, H_i,
                               g_i, u_i) == 0;
 }
+
+// ---------------------------------------------------------------------------
+// Per-group factorisation.
+//
+// Every trip of an OD group shares the group's active set, so the parts of
+// schur_contribution that depend on it alone -- G = A A^T, its Cholesky factor,
+// A Z, G^{-1} A Z and H_i = Z^T P Z -- are the same for all of them. They are
+// computed here once per group; GroupSchur::trip then does only what depends
+// on the trip's route: A w, one triangular solve per weight vector, and the
+// K-vectors g_i and u_i. The arithmetic is schur_contribution's, operation for
+// operation, on the build without BLAS: G's entries are sums of products of
+// the incidence's +-1 entries and so exact in any order, A w visits the
+// nonzeros of each row in the column order of the dense loop it replaces
+// (the zeros it skips add exact zeros), and small_cho_solve treats every
+// right-hand side independently. A pass therefore costs one factorisation per
+// group plus O(m^2) per trip, instead of O(m^2 e + m^3) per trip.
+// ---------------------------------------------------------------------------
+
+bool GroupSchur::prepare(const double *Z_act, const double *A_local, int e_, int m_, int K_) {
+    e = e_;
+    m = m_;
+    K = K_;
+    ok = false;
+
+    // The nonzeros of A, by row in ascending column order (for A w), and by
+    // column (for G).
+    row_ptr.assign(m + 1, 0);
+    col.clear();
+    val.clear();
+    for (int i = 0; i < m; i++) {
+        for (int p = 0; p < e; p++) {
+            double a = A_local[(int64_t)i * e + p];
+            if (a != 0.0) {
+                col.push_back(p);
+                val.push_back(a);
+            }
+        }
+        row_ptr[i + 1] = (int)col.size();
+    }
+
+    // G = A A^T from the nonzeros, column by column in ascending order.
+    L.assign((int64_t)m * m, 0.0);
+    {
+        std::vector<int> col_ptr(e + 1, 0), col_row(col.size());
+        std::vector<double> col_val(col.size());
+        for (int c : col) col_ptr[c + 1]++;
+        for (int p = 0; p < e; p++) col_ptr[p + 1] += col_ptr[p];
+        std::vector<int> next(col_ptr.begin(), col_ptr.end() - 1);
+        for (int i = 0; i < m; i++)
+            for (int q = row_ptr[i]; q < row_ptr[i + 1]; q++) {
+                int slot = next[col[q]]++;
+                col_row[slot] = i;
+                col_val[slot] = val[q];
+            }
+        for (int p = 0; p < e; p++)
+            for (int a = col_ptr[p]; a < col_ptr[p + 1]; a++)
+                for (int b = col_ptr[p]; b <= a; b++) {
+                    int i = col_row[a], j = col_row[b];  // i >= j: rows ascend within a column
+                    double prod = col_val[a] * col_val[b];
+                    L[(int64_t)i * m + j] += prod;
+                    if (i != j) L[(int64_t)j * m + i] += prod;
+                }
+    }
+
+    // Its Cholesky factor, as schur_contribution takes it.
+#ifdef HAVE_LAPACK
+    if (m > LAPACK_THRESHOLD) {
+        char uplo = 'U';
+        int info = 0;
+        dpotrf_(&uplo, &m, L.data(), &m, &info);
+        if (info != 0) return false;
+    } else
+#endif
+    {
+        if (small_cholesky(L.data(), m) != 0) return false;
+    }
+
+    // A Z (m x K).
+    AZ.assign((int64_t)m * K, 0.0);
+#ifdef HAVE_LAPACK
+    if (m > LAPACK_THRESHOLD) {
+        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, m, K, e, 1.0, A_local, e, Z_act, K,
+                    0.0, AZ.data(), K);
+    } else
+#endif
+    {
+        for (int i = 0; i < m; i++)
+            for (int k = 0; k < K; k++) {
+                double s = 0.0;
+                for (int q = row_ptr[i]; q < row_ptr[i + 1]; q++)
+                    s += val[q] * Z_act[col[q] * K + k];
+                AZ[i * K + k] = s;
+            }
+    }
+
+    // T_Z = G^{-1} A Z, then H = Z^T Z - (A Z)^T T_Z, as schur_contribution.
+    std::vector<double> TZ(AZ);
+    small_cho_solve(L.data(), TZ.data(), m, K);
+    std::vector<double> ZtZ(K * K, 0.0);
+    for (int i = 0; i < K; i++)
+        for (int j = 0; j <= i; j++) {
+            double s = 0.0;
+            for (int p = 0; p < e; p++) s += Z_act[p * K + i] * Z_act[p * K + j];
+            ZtZ[i * K + j] = s;
+            ZtZ[j * K + i] = s;
+        }
+    H.assign(K * K, 0.0);
+    for (int i = 0; i < K; i++)
+        for (int j = 0; j < K; j++) {
+            double s = 0.0;
+            for (int p = 0; p < m; p++) s += AZ[p * K + i] * TZ[p * K + j];
+            H[i * K + j] = ZtZ[i * K + j] - s;
+        }
+    ok = true;
+    return true;
+}
+
+void GroupSchur::trip(const double *Z_act, const double *w_y, const double *w_r,
+                      std::vector<double> &buf, double *H_i, double *g_i, double *u_i) const {
+    int nw = w_r ? 2 : 1;
+    buf.assign((int64_t)m * nw, 0.0);
+    for (int i = 0; i < m; i++) {
+        double sy = 0.0, sr = 0.0;
+        for (int q = row_ptr[i]; q < row_ptr[i + 1]; q++) {
+            sy += val[q] * w_y[col[q]];
+            if (w_r) sr += val[q] * w_r[col[q]];
+        }
+        buf[i * nw] = sy;
+        if (w_r) buf[i * nw + 1] = sr;
+    }
+    small_cho_solve(L.data(), buf.data(), m, nw);
+
+    for (int i = 0; i < K * K; i++) H_i[i] = H[i];
+    for (int k = 0; k < K; k++) {
+        double s = 0.0;
+        for (int i = 0; i < e; i++) s += Z_act[i * K + k] * w_y[i];
+        g_i[k] = s;
+    }
+    for (int k = 0; k < K; k++) {
+        double s = 0.0;
+        for (int i = 0; i < m; i++) s += AZ[i * K + k] * buf[i * nw];
+        g_i[k] -= s;
+    }
+    if (w_r && u_i) {
+        for (int k = 0; k < K; k++) {
+            double s = 0.0;
+            for (int i = 0; i < e; i++) s += Z_act[i * K + k] * w_r[i];
+            u_i[k] = s;
+        }
+        for (int k = 0; k < K; k++) {
+            double s = 0.0;
+            for (int i = 0; i < m; i++) s += AZ[i * K + k] * buf[i * nw + 1];
+            u_i[k] -= s;
+        }
+    }
+}
+
+// accumulate_trip_sparse's gather of the route onto the active set, then the
+// trip's part of the group's Schur step.
+void accumulate_trip_group(const GroupSchur &gs, const int *active_idx, int n_active,
+                           const double *Z_act, const double *scale_m, const int64_t *y_indices,
+                           const double *y_data, int64_t y_start, int64_t y_end, const double *x,
+                           bool compute_u, std::vector<int> &active_pos_map,
+                           std::vector<double> &y_active_buf, std::vector<double> &w_y_buf,
+                           std::vector<double> &w_r_buf, std::vector<double> &b_buf, double *H_i,
+                           double *g_i, double *u_i) {
+    y_active_buf.assign(n_active, 0.0);
+    for (int i = 0; i < n_active; i++) active_pos_map[active_idx[i]] = i;
+    for (int64_t p = y_start; p < y_end; p++) {
+        int edge = (int)y_indices[p];
+        int pos = active_pos_map[edge];
+        if (pos >= 0) y_active_buf[pos] += y_data[p];
+    }
+    w_y_buf.resize(n_active);
+    for (int i = 0; i < n_active; i++) w_y_buf[i] = scale_m[active_idx[i]] * y_active_buf[i];
+    double *w_r_ptr = nullptr;
+    if (compute_u) {
+        w_r_buf.resize(n_active);
+        for (int i = 0; i < n_active; i++) {
+            int idx = active_idx[i];
+            w_r_buf[i] = scale_m[idx] * (y_active_buf[i] - x[idx]);
+        }
+        w_r_ptr = w_r_buf.data();
+    }
+    for (int i = 0; i < n_active; i++) active_pos_map[active_idx[i]] = -1;
+
+    std::fill(H_i, H_i + gs.K * gs.K, 0.0);
+    std::fill(g_i, g_i + gs.K, 0.0);
+    if (u_i) std::fill(u_i, u_i + gs.K, 0.0);
+    gs.trip(Z_act, w_y_buf.data(), w_r_ptr, b_buf, H_i, g_i, u_i);
+}

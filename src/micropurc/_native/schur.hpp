@@ -33,3 +33,30 @@ bool accumulate_trip_sparse(const int *active_idx, int n_active, int m_rows, int
                             std::vector<int> &active_pos_map, std::vector<double> &y_active_buf,
                             std::vector<double> &w_y_buf, std::vector<double> &w_r_buf, double *H_i,
                             double *g_i, double *u_i);
+
+// The part of the Schur step that depends only on an OD group's active set,
+// computed once for all its trips (schur.cpp). prepare returns false when G's
+// Cholesky fails, which drops every trip of the group, as each trip's own
+// factorisation of the same G would.
+struct GroupSchur {
+    int e = 0, m = 0, K = 0;
+    bool ok = false;
+    std::vector<int> row_ptr, col;  // nonzeros of A, by row, ascending column
+    std::vector<double> val;
+    std::vector<double> L;   // Cholesky factor of G = A A^T, lower, row-major (m x m)
+    std::vector<double> AZ;  // A Z (m x K)
+    std::vector<double> H;   // Z^T P Z (K x K), every trip's H_i
+
+    bool prepare(const double *Z_act, const double *A_local, int e, int m, int K);
+    void trip(const double *Z_act, const double *w_y, const double *w_r, std::vector<double> &buf,
+              double *H_i, double *g_i, double *u_i) const;
+};
+
+// accumulate_trip_sparse with the group's factorisation in hand.
+void accumulate_trip_group(const GroupSchur &gs, const int *active_idx, int n_active,
+                           const double *Z_act, const double *scale_m, const int64_t *y_indices,
+                           const double *y_data, int64_t y_start, int64_t y_end, const double *x,
+                           bool compute_u, std::vector<int> &active_pos_map,
+                           std::vector<double> &y_active_buf, std::vector<double> &w_y_buf,
+                           std::vector<double> &w_r_buf, std::vector<double> &b_buf, double *H_i,
+                           double *g_i, double *u_i);

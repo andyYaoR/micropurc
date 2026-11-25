@@ -448,3 +448,57 @@ class TestPseudoinverseOracle:
         np.testing.assert_allclose(
             P_grounded, P_torch, atol=1e-10, err_msg="grounded != torch.linalg.pinv"
         )
+
+
+class TestGroupSchur:
+    """One factorisation per active set gives every trip's own Schur contribution.
+
+    The batch passes factorise G = A A' once per OD group and do only the
+    route-dependent part per trip (``GroupSchur`` in ``schur.cpp``). On a system
+    of at most ``LAPACK_THRESHOLD`` (24) rows both paths run the same loops, so
+    the contributions are bitwise those of ``schur_contribution`` trip by trip;
+    above it the per-trip path uses BLAS for A M, which reorders sums.
+    """
+
+    @staticmethod
+    def _trips(V: int, L: int, K: int, seed: int, n: int = 6):
+        Z_act, A_local, _, scale_act, x_hat_act = _build_test_inputs(V, L, K, seed)
+        rng = np.random.default_rng(seed + 100)
+        Y = rng.choice([0.0, 1.0, 2.0], size=(n, Z_act.shape[0]), p=[0.6, 0.3, 0.1])
+        return (
+            np.ascontiguousarray(Z_act),
+            np.ascontiguousarray(A_local),
+            np.ascontiguousarray(Y),
+            np.ascontiguousarray(scale_act),
+            np.ascontiguousarray(x_hat_act),
+        )
+
+    @pytest.mark.parametrize("seed", [0, 1, 2, 3, 42])
+    @pytest.mark.parametrize("K", [1, 3, 6])
+    def test_bitwise_equal_to_one_trip_at_a_time(self, seed: int, K: int) -> None:
+        """At m <= 24 the group path is schur_contribution's arithmetic exactly."""
+        from micropurc._native import group_schur_contributions, schur_contribution
+
+        Z_act, A_local, Y, scale, x_hat = self._trips(8, 15, K, seed)
+        assert A_local.shape[0] <= 24
+        H, g, u = group_schur_contributions(Z_act, A_local, Y, scale, x_hat)
+        for t in range(Y.shape[0]):
+            H_t, g_t, u_t = schur_contribution(Z_act, A_local, Y[t], scale, x_hat)
+            assert np.array_equal(H[t], H_t)
+            assert np.array_equal(g[t], g_t)
+            assert np.array_equal(u[t], u_t)
+
+    @pytest.mark.parametrize("seed", [0, 7])
+    def test_equal_to_rounding_above_the_lapack_threshold(self, seed: int) -> None:
+        """At m > 24 the two paths agree to rounding, and every trip shares one H."""
+        from micropurc._native import group_schur_contributions, schur_contribution
+
+        Z_act, A_local, Y, scale, x_hat = self._trips(60, 140, 4, seed, n=4)
+        assert A_local.shape[0] > 24
+        H, g, u = group_schur_contributions(Z_act, A_local, Y, scale, x_hat)
+        for t in range(Y.shape[0]):
+            H_t, g_t, u_t = schur_contribution(Z_act, A_local, Y[t], scale, x_hat)
+            np.testing.assert_allclose(H[t], H_t, rtol=1e-11, atol=1e-11)
+            np.testing.assert_allclose(g[t], g_t, rtol=1e-11, atol=1e-11)
+            np.testing.assert_allclose(u[t], u_t, rtol=1e-11, atol=1e-11)
+            assert np.array_equal(H[t], H[0])

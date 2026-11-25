@@ -268,6 +268,52 @@ static nb::dict determine_active_set_native(
     return out;
 }
 
+// Every trip of one active set through GroupSchur: the factorisation once,
+// then each row of Y. The batch passes use the same two steps; this entry point
+// exists so the tests can hold them against schur_contribution trip by trip.
+static nb::tuple group_schur_contributions_native(
+    nb::ndarray<double, nb::shape<-1, -1>, nb::c_contig> Z_arr,
+    nb::ndarray<double, nb::shape<-1, -1>, nb::c_contig> A_arr,
+    nb::ndarray<double, nb::shape<-1, -1>, nb::c_contig> Y_arr,
+    nb::ndarray<double, nb::shape<-1>, nb::c_contig> scale_arr, nb::object x_hat_obj) {
+    int e = (int)Z_arr.shape(0);
+    int K = (int)Z_arr.shape(1);
+    int m = (int)A_arr.shape(0);
+    int n = (int)Y_arr.shape(0);
+    if ((int)Y_arr.shape(1) != e || (int)scale_arr.shape(0) != e || (int)A_arr.shape(1) != e)
+        throw std::invalid_argument("Y, scale and A must have one column per active link");
+    const double *Z = Z_arr.data();
+    const double *scale = scale_arr.data();
+    const double *x_hat = nullptr;
+    if (!x_hat_obj.is_none())
+        x_hat = nb::cast<nb::ndarray<double, nb::shape<-1>, nb::c_contig>>(x_hat_obj).data();
+
+    GroupSchur gs;
+    if (!gs.prepare(Z, A_arr.data(), e, m, K))
+        throw std::runtime_error("Schur contribution Cholesky failed");
+
+    double *H = new double[(int64_t)n * K * K]();
+    double *g = new double[(int64_t)n * K]();
+    double *u = new double[(int64_t)n * K]();
+    std::vector<double> w_y(e), w_r(e), buf;
+    for (int t = 0; t < n; t++) {
+        const double *y = Y_arr.data() + (int64_t)t * e;
+        for (int i = 0; i < e; i++) w_y[i] = scale[i] * y[i];
+        if (x_hat)
+            for (int i = 0; i < e; i++) w_r[i] = scale[i] * (y[i] - x_hat[i]);
+        gs.trip(Z, w_y.data(), x_hat ? w_r.data() : nullptr, buf, H + (int64_t)t * K * K,
+                g + (int64_t)t * K, u + (int64_t)t * K);
+    }
+    nb::capsule H_owner(H, [](void *p) noexcept { delete[] (double *)p; });
+    nb::capsule g_owner(g, [](void *p) noexcept { delete[] (double *)p; });
+    nb::capsule u_owner(u, [](void *p) noexcept { delete[] (double *)p; });
+    size_t H_shape[3] = {(size_t)n, (size_t)K, (size_t)K};
+    size_t g_shape[2] = {(size_t)n, (size_t)K};
+    return nb::make_tuple(nb::ndarray<nb::numpy, double>(H, 3, H_shape, H_owner),
+                          nb::ndarray<nb::numpy, double>(g, 2, g_shape, g_owner),
+                          nb::ndarray<nb::numpy, double>(u, 2, g_shape, u_owner));
+}
+
 static nb::tuple schur_contribution_native(
     nb::ndarray<double, nb::shape<-1, -1>, nb::c_contig> Z_arr,
     nb::ndarray<double, nb::shape<-1, -1>, nb::c_contig> A_arr,
@@ -1051,8 +1097,9 @@ class NativePIQPContext {
             Eigen::VectorXd b_vec = Eigen::VectorXd::Zero(V);
 
             std::vector<int> active_idx, kept_rows, active_pos_map(L, -1);
-            std::vector<double> A_local_buf, Z_act_buf, y_active_buf, w_y_buf, w_r_buf;
+            std::vector<double> A_local_buf, Z_act_buf, y_active_buf, w_y_buf, w_r_buf, b_buf;
             std::vector<double> H_i(K * K), g_i(K), u_i(K);
+            GroupSchur group_schur;
             // CTS thread-local scratch
             std::vector<double> cts_slack(L);
             std::vector<int> cts_stamp(V, 0), cts_pos(V, 0), cts_arc_stamp(L, 0), cts_wl;
@@ -1163,14 +1210,24 @@ class NativePIQPContext {
 
                 int64_t ahash = hash_active_set(active_idx.data(), proj.n_active);
 
+                // The group's share of the Schur step, once for all its trips.
+                auto t_group0 = std::chrono::steady_clock::now();
+                bool group_ok = group_schur.prepare(Z_act_buf.data(), A_local_buf.data(),
+                                                    proj.n_active, proj.m_rows, K);
+                schur_time_local[tid] +=
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t_group0)
+                        .count();
+
                 for (int n : trips_for_group[u]) {
                     int64_t ys = y_indptr[n], ye = y_indptr[n + 1];
                     auto t_schur0 = std::chrono::steady_clock::now();
-                    bool trip_ok = accumulate_trip_sparse(
-                        active_idx.data(), proj.n_active, proj.m_rows, K, Z_act_buf.data(),
-                        A_local_buf.data(), scale_m.data(), y_indices, y_data, ys, ye, x_slot,
-                        return_u, active_pos_map, y_active_buf, w_y_buf, w_r_buf, H_i.data(),
-                        g_i.data(), u_i.data());
+                    bool trip_ok = group_ok;
+                    if (group_ok)
+                        accumulate_trip_group(group_schur, active_idx.data(), proj.n_active,
+                                              Z_act_buf.data(), scale_m.data(), y_indices, y_data,
+                                              ys, ye, x_slot, return_u, active_pos_map,
+                                              y_active_buf, w_y_buf, w_r_buf, b_buf, H_i.data(),
+                                              g_i.data(), u_i.data());
                     auto t_schur1 = std::chrono::steady_clock::now();
                     schur_time_local[tid] +=
                         std::chrono::duration<double>(t_schur1 - t_schur0).count();
@@ -1725,10 +1782,11 @@ static nb::tuple batch_solve_and_accumulate(
         double *H_loc = H_locals[tid].data();
         double *g_loc = g_locals[tid].data();
         std::vector<int> active_idx, kept_rows;
-        std::vector<double> A_local_buf, Z_act_buf, w_y_buf, w_r_buf;
+        std::vector<double> A_local_buf, Z_act_buf, w_y_buf, w_r_buf, b_buf;
         std::vector<int> active_pos_map(L, -1);
         std::vector<double> x_u(L, 0.0), y_active_buf, zbl_scratch(L, 0.0);
         std::vector<double> H_i(K * K), g_i(K), u_i(K);
+        GroupSchur group_schur;
 
         while (true) {
             int u = next_od.fetch_add(1, std::memory_order_relaxed);
@@ -1771,16 +1829,24 @@ static nb::tuple batch_solve_and_accumulate(
 
             int64_t ahash = hash_active_set(active_idx.data(), proj.n_active);
 
+            // The group's share of the Schur step, once for all its trips.
+            auto t_group0 = std::chrono::steady_clock::now();
+            bool group_ok = group_schur.prepare(Z_act_buf.data(), A_local_buf.data(), proj.n_active,
+                                                proj.m_rows, K);
+            schur_time_local[tid] +=
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t_group0).count();
+
             // Accumulate every trip of the group against this one projection.
             for (int n : trips_for_od[u]) {
                 int64_t ys = y_indptr[n], ye = y_indptr[n + 1];
 
                 auto t_schur0 = std::chrono::steady_clock::now();
-                bool trip_ok = accumulate_trip_sparse(
-                    active_idx.data(), proj.n_active, proj.m_rows, K, Z_act_buf.data(),
-                    A_local_buf.data(), scale_m, y_indices, y_data, ys, ye, x_u.data(), return_u,
-                    active_pos_map, y_active_buf, w_y_buf, w_r_buf, H_i.data(), g_i.data(),
-                    u_i.data());
+                bool trip_ok = group_ok;
+                if (group_ok)
+                    accumulate_trip_group(
+                        group_schur, active_idx.data(), proj.n_active, Z_act_buf.data(), scale_m,
+                        y_indices, y_data, ys, ye, x_u.data(), return_u, active_pos_map,
+                        y_active_buf, w_y_buf, w_r_buf, b_buf, H_i.data(), g_i.data(), u_i.data());
                 auto t_schur1 = std::chrono::steady_clock::now();
                 schur_time_local[tid] += std::chrono::duration<double>(t_schur1 - t_schur0).count();
 
@@ -2295,6 +2361,10 @@ NB_MODULE(_native, m) {
     m.def("schur_contribution", &schur_contribution_native, nb::arg("Z_act"), nb::arg("A_local"),
           nb::arg("y_act"), nb::arg("scale_act"), nb::arg("x_hat_act") = nb::none(),
           "Compute one Schur contribution via the native C++ implementation.");
+    m.def("group_schur_contributions", &group_schur_contributions_native, nb::arg("Z_act"),
+          nb::arg("A_local"), nb::arg("Y_act"), nb::arg("scale_act"),
+          nb::arg("x_hat_act") = nb::none(),
+          "Schur contributions of several trips on one active set, factorised once.");
 
 #ifdef HAVE_PIQP
     nb::enum_<piqp::Status>(m, "Status", nb::is_arithmetic(),
