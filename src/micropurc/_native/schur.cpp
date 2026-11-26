@@ -1,6 +1,9 @@
-// Definitions for schur.hpp: the per-trip Schur-complement contribution.
+// Definitions for schur.hpp: the per-trip Schur-complement contribution, and the
+// per-group factorisation the batch passes use.
 
 #include "schur.hpp"
+
+#include <Eigen/Sparse>
 
 #include "common.hpp"
 
@@ -238,190 +241,177 @@ bool accumulate_trip_sparse(const int *active_idx, int n_active, int m_rows, int
 // ---------------------------------------------------------------------------
 // Per-group factorisation.
 //
-// Every trip of an OD group shares the group's active set, so the parts of
-// schur_contribution that depend on it alone -- G = A A^T, its Cholesky factor,
-// A Z, G^{-1} A Z and H_i = Z^T P Z -- are the same for all of them. They are
-// computed here once per group; GroupSchur::trip then does only what depends
-// on the trip's route: A w, one triangular solve per weight vector, and the
-// K-vectors g_i and u_i. The arithmetic is schur_contribution's, operation for
-// operation, on the build without BLAS: G's entries are sums of products of
-// the incidence's +-1 entries and so exact in any order, A w visits the
-// nonzeros of each row in the column order of the dense loop it replaces
-// (the zeros it skips add exact zeros), and small_cho_solve treats every
-// right-hand side independently. A pass therefore costs one factorisation per
-// group plus O(m^2) per trip, instead of O(m^2 e + m^3) per trip.
+// Every trip of an OD group shares the group's active set, and the Schur step
+// splits into a part that depends only on that set and a part linear in the
+// trip's weight vector:
+//
+//   H_i = Z' P Z,    g_i = (P Z)' w_y,    u_i = (P Z)' w_r,
+//
+// with P = I - A' G^{-1} A and G = A A'. G is the Laplacian of the active
+// subnetwork with one node grounded per component, so it is factorised sparsely
+// (a simplicial LL' with an approximate-minimum-degree ordering), the way
+// the static PURC least squares factorises its projector; a road network's
+// active subgraph is nearly planar and the factor stays sparse. Once per group,
+// GroupSchur::prepare forms R = P Z = Z - A' G^{-1} A Z (e x K) and H; a trip
+// then costs one K-vector per traversed active link: g_i = sum over the route
+// of R_j * scale_j * y_j, and u_i = g_i - R' (scale . x_hat), whose second term
+// is the group's too. Nothing per trip touches an m x m matrix.
+//
+// This is schur_contribution's algebra regrouped, not its arithmetic: the two
+// agree to rounding (tests/test_projection.py).
 // ---------------------------------------------------------------------------
 
-bool GroupSchur::prepare(const double *Z_act, const double *A_local, int e_, int m_, int K_) {
+namespace {
+
+// Finish prepare from the nonzeros of A, given column by column.
+bool group_schur_finish(GroupSchur &gs, const double *Z_act, const std::vector<int> &col_ptr,
+                        const std::vector<int> &col_row, const std::vector<double> &col_val) {
+    const int e = gs.e, m = gs.m, K = gs.K;
+
+    // G = A A' (lower triangle) from the nonzeros.
+    std::vector<Eigen::Triplet<double>> triplets;
+    triplets.reserve(col_row.size() * 2);
+    for (int p = 0; p < e; p++)
+        for (int a = col_ptr[p]; a < col_ptr[p + 1]; a++)
+            for (int b = col_ptr[p]; b < col_ptr[p + 1]; b++) {
+                int i = col_row[a], j = col_row[b];
+                if (i >= j) triplets.emplace_back(i, j, col_val[a] * col_val[b]);
+            }
+    Eigen::SparseMatrix<double> G(m, m);
+    G.setFromTriplets(triplets.begin(), triplets.end());
+
+    Eigen::SimplicialLLT<Eigen::SparseMatrix<double>, Eigen::Lower, Eigen::AMDOrdering<int>> llt;
+    llt.compute(G);
+    if (llt.info() != Eigen::Success) return false;
+
+    // A Z (m x K), then T = G^{-1} A Z.
+    Eigen::MatrixXd AZ = Eigen::MatrixXd::Zero(m, K);
+    for (int p = 0; p < e; p++)
+        for (int a = col_ptr[p]; a < col_ptr[p + 1]; a++)
+            for (int k = 0; k < K; k++) AZ(col_row[a], k) += col_val[a] * Z_act[p * K + k];
+    Eigen::MatrixXd T = llt.solve(AZ);
+    if (llt.info() != Eigen::Success) return false;
+
+    // R = Z - A' T (e x K, row-major) and H = Z' Z - (A Z)' T.
+    gs.R.assign((int64_t)e * K, 0.0);
+    for (int p = 0; p < e; p++)
+        for (int k = 0; k < K; k++) {
+            double s = Z_act[p * K + k];
+            for (int a = col_ptr[p]; a < col_ptr[p + 1]; a++) s -= col_val[a] * T(col_row[a], k);
+            gs.R[(int64_t)p * K + k] = s;
+        }
+    gs.H.assign(K * K, 0.0);
+    for (int i = 0; i < K; i++)
+        for (int j = 0; j < K; j++) {
+            double zz = 0.0;
+            for (int p = 0; p < e; p++) zz += Z_act[p * K + i] * Z_act[p * K + j];
+            double at = 0.0;
+            for (int r = 0; r < m; r++) at += AZ(r, i) * T(r, j);
+            gs.H[i * K + j] = zz - at;
+        }
+    gs.ok = true;
+    return true;
+}
+
+}  // namespace
+
+bool GroupSchur::prepare(const double *Z_act, const int64_t *A_indptr, const int64_t *A_indices,
+                         const double *A_data, const int *active_idx, int n_active,
+                         const int *kept_rows, int n_kept, int K_, int n_links,
+                         std::vector<int> &row_map_scratch) {
+    e = n_active;
+    m = n_kept;
+    K = K_;
+    ok = false;
+    for (int j : linked) pos[j] = -1;
+    if ((int)pos.size() < n_links) pos.resize(n_links, -1);
+    linked.assign(active_idx, active_idx + n_active);
+    for (int p = 0; p < n_active; p++) pos[active_idx[p]] = p;
+    if (m <= 0 || e <= 0) return false;
+
+    // kept_rows -> dense row index; the scratch is -1 everywhere on entry and
+    // is restored on exactly the rows set here.
+    int max_row = kept_rows[n_kept - 1] + 1;
+    if ((int)row_map_scratch.size() < max_row) row_map_scratch.resize(max_row, -1);
+    for (int i = 0; i < m; i++) row_map_scratch[kept_rows[i]] = i;
+
+    std::vector<int> col_ptr(e + 1, 0), col_row;
+    std::vector<double> col_val;
+    col_row.reserve((size_t)e * 2);
+    col_val.reserve((size_t)e * 2);
+    for (int p = 0; p < e; p++) {
+        int edge = active_idx[p];
+        for (int64_t q = A_indptr[edge]; q < A_indptr[edge + 1]; q++) {
+            int row = (int)A_indices[q];
+            if (row < max_row && row_map_scratch[row] >= 0 && A_data[q] != 0.0) {
+                col_row.push_back(row_map_scratch[row]);
+                col_val.push_back(A_data[q]);
+            }
+        }
+        col_ptr[p + 1] = (int)col_row.size();
+    }
+    for (int i = 0; i < m; i++) row_map_scratch[kept_rows[i]] = -1;
+    return group_schur_finish(*this, Z_act, col_ptr, col_row, col_val);
+}
+
+bool GroupSchur::prepare_dense(const double *Z_act, const double *A_local, int e_, int m_, int K_) {
     e = e_;
     m = m_;
     K = K_;
     ok = false;
-
-    // The nonzeros of A, by row in ascending column order (for A w), and by
-    // column (for G).
-    row_ptr.assign(m + 1, 0);
-    col.clear();
-    val.clear();
-    for (int i = 0; i < m; i++) {
-        for (int p = 0; p < e; p++) {
+    if (m <= 0 || e <= 0) return false;
+    std::vector<int> col_ptr(e + 1, 0), col_row;
+    std::vector<double> col_val;
+    for (int p = 0; p < e; p++) {
+        for (int i = 0; i < m; i++) {
             double a = A_local[(int64_t)i * e + p];
             if (a != 0.0) {
-                col.push_back(p);
-                val.push_back(a);
+                col_row.push_back(i);
+                col_val.push_back(a);
             }
         }
-        row_ptr[i + 1] = (int)col.size();
+        col_ptr[p + 1] = (int)col_row.size();
     }
-
-    // G = A A^T from the nonzeros, column by column in ascending order.
-    L.assign((int64_t)m * m, 0.0);
-    {
-        std::vector<int> col_ptr(e + 1, 0), col_row(col.size());
-        std::vector<double> col_val(col.size());
-        for (int c : col) col_ptr[c + 1]++;
-        for (int p = 0; p < e; p++) col_ptr[p + 1] += col_ptr[p];
-        std::vector<int> next(col_ptr.begin(), col_ptr.end() - 1);
-        for (int i = 0; i < m; i++)
-            for (int q = row_ptr[i]; q < row_ptr[i + 1]; q++) {
-                int slot = next[col[q]]++;
-                col_row[slot] = i;
-                col_val[slot] = val[q];
-            }
-        for (int p = 0; p < e; p++)
-            for (int a = col_ptr[p]; a < col_ptr[p + 1]; a++)
-                for (int b = col_ptr[p]; b <= a; b++) {
-                    int i = col_row[a], j = col_row[b];  // i >= j: rows ascend within a column
-                    double prod = col_val[a] * col_val[b];
-                    L[(int64_t)i * m + j] += prod;
-                    if (i != j) L[(int64_t)j * m + i] += prod;
-                }
-    }
-
-    // Its Cholesky factor, as schur_contribution takes it.
-#ifdef HAVE_LAPACK
-    if (m > LAPACK_THRESHOLD) {
-        char uplo = 'U';
-        int info = 0;
-        dpotrf_(&uplo, &m, L.data(), &m, &info);
-        if (info != 0) return false;
-    } else
-#endif
-    {
-        if (small_cholesky(L.data(), m) != 0) return false;
-    }
-
-    // A Z (m x K).
-    AZ.assign((int64_t)m * K, 0.0);
-#ifdef HAVE_LAPACK
-    if (m > LAPACK_THRESHOLD) {
-        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, m, K, e, 1.0, A_local, e, Z_act, K,
-                    0.0, AZ.data(), K);
-    } else
-#endif
-    {
-        for (int i = 0; i < m; i++)
-            for (int k = 0; k < K; k++) {
-                double s = 0.0;
-                for (int q = row_ptr[i]; q < row_ptr[i + 1]; q++)
-                    s += val[q] * Z_act[col[q] * K + k];
-                AZ[i * K + k] = s;
-            }
-    }
-
-    // T_Z = G^{-1} A Z, then H = Z^T Z - (A Z)^T T_Z, as schur_contribution.
-    std::vector<double> TZ(AZ);
-    small_cho_solve(L.data(), TZ.data(), m, K);
-    std::vector<double> ZtZ(K * K, 0.0);
-    for (int i = 0; i < K; i++)
-        for (int j = 0; j <= i; j++) {
-            double s = 0.0;
-            for (int p = 0; p < e; p++) s += Z_act[p * K + i] * Z_act[p * K + j];
-            ZtZ[i * K + j] = s;
-            ZtZ[j * K + i] = s;
-        }
-    H.assign(K * K, 0.0);
-    for (int i = 0; i < K; i++)
-        for (int j = 0; j < K; j++) {
-            double s = 0.0;
-            for (int p = 0; p < m; p++) s += AZ[p * K + i] * TZ[p * K + j];
-            H[i * K + j] = ZtZ[i * K + j] - s;
-        }
-    ok = true;
-    return true;
+    return group_schur_finish(*this, Z_act, col_ptr, col_row, col_val);
 }
 
-void GroupSchur::trip(const double *Z_act, const double *w_y, const double *w_r,
-                      std::vector<double> &buf, double *H_i, double *g_i, double *u_i) const {
-    int nw = w_r ? 2 : 1;
-    buf.assign((int64_t)m * nw, 0.0);
-    for (int i = 0; i < m; i++) {
-        double sy = 0.0, sr = 0.0;
-        for (int q = row_ptr[i]; q < row_ptr[i + 1]; q++) {
-            sy += val[q] * w_y[col[q]];
-            if (w_r) sr += val[q] * w_r[col[q]];
-        }
-        buf[i * nw] = sy;
-        if (w_r) buf[i * nw + 1] = sr;
+void GroupSchur::scores_offset(const double *scale_m, const double *x,
+                               std::vector<double> &c) const {
+    c.assign(K, 0.0);
+    for (int p = 0; p < e; p++) {
+        int edge = linked[p];
+        double w = scale_m[edge] * x[edge];
+        if (w == 0.0) continue;
+        for (int k = 0; k < K; k++) c[k] += R[(int64_t)p * K + k] * w;
     }
-    small_cho_solve(L.data(), buf.data(), m, nw);
+}
 
+void GroupSchur::trip(const double *scale_m, const int64_t *y_indices, const double *y_data,
+                      int64_t y_start, int64_t y_end, const double *c, double *H_i, double *g_i,
+                      double *u_i) const {
+    for (int i = 0; i < K * K; i++) H_i[i] = H[i];
+    for (int k = 0; k < K; k++) g_i[k] = 0.0;
+    for (int64_t q = y_start; q < y_end; q++) {
+        int edge = (int)y_indices[q];
+        int row = edge < (int)pos.size() ? pos[edge] : -1;
+        if (row < 0) continue;
+        double w = scale_m[edge] * y_data[q];
+        for (int k = 0; k < K; k++) g_i[k] += R[(int64_t)row * K + k] * w;
+    }
+    if (c && u_i)
+        for (int k = 0; k < K; k++) u_i[k] = g_i[k] - c[k];
+}
+
+void GroupSchur::trip_dense(const double *w_y, const double *w_r, double *H_i, double *g_i,
+                            double *u_i) const {
     for (int i = 0; i < K * K; i++) H_i[i] = H[i];
     for (int k = 0; k < K; k++) {
-        double s = 0.0;
-        for (int i = 0; i < e; i++) s += Z_act[i * K + k] * w_y[i];
-        g_i[k] = s;
-    }
-    for (int k = 0; k < K; k++) {
-        double s = 0.0;
-        for (int i = 0; i < m; i++) s += AZ[i * K + k] * buf[i * nw];
-        g_i[k] -= s;
-    }
-    if (w_r && u_i) {
-        for (int k = 0; k < K; k++) {
-            double s = 0.0;
-            for (int i = 0; i < e; i++) s += Z_act[i * K + k] * w_r[i];
-            u_i[k] = s;
+        double sy = 0.0, sr = 0.0;
+        for (int p = 0; p < e; p++) {
+            sy += R[(int64_t)p * K + k] * w_y[p];
+            if (w_r) sr += R[(int64_t)p * K + k] * w_r[p];
         }
-        for (int k = 0; k < K; k++) {
-            double s = 0.0;
-            for (int i = 0; i < m; i++) s += AZ[i * K + k] * buf[i * nw + 1];
-            u_i[k] -= s;
-        }
+        g_i[k] = sy;
+        if (w_r && u_i) u_i[k] = sr;
     }
-}
-
-// accumulate_trip_sparse's gather of the route onto the active set, then the
-// trip's part of the group's Schur step.
-void accumulate_trip_group(const GroupSchur &gs, const int *active_idx, int n_active,
-                           const double *Z_act, const double *scale_m, const int64_t *y_indices,
-                           const double *y_data, int64_t y_start, int64_t y_end, const double *x,
-                           bool compute_u, std::vector<int> &active_pos_map,
-                           std::vector<double> &y_active_buf, std::vector<double> &w_y_buf,
-                           std::vector<double> &w_r_buf, std::vector<double> &b_buf, double *H_i,
-                           double *g_i, double *u_i) {
-    y_active_buf.assign(n_active, 0.0);
-    for (int i = 0; i < n_active; i++) active_pos_map[active_idx[i]] = i;
-    for (int64_t p = y_start; p < y_end; p++) {
-        int edge = (int)y_indices[p];
-        int pos = active_pos_map[edge];
-        if (pos >= 0) y_active_buf[pos] += y_data[p];
-    }
-    w_y_buf.resize(n_active);
-    for (int i = 0; i < n_active; i++) w_y_buf[i] = scale_m[active_idx[i]] * y_active_buf[i];
-    double *w_r_ptr = nullptr;
-    if (compute_u) {
-        w_r_buf.resize(n_active);
-        for (int i = 0; i < n_active; i++) {
-            int idx = active_idx[i];
-            w_r_buf[i] = scale_m[idx] * (y_active_buf[i] - x[idx]);
-        }
-        w_r_ptr = w_r_buf.data();
-    }
-    for (int i = 0; i < n_active; i++) active_pos_map[active_idx[i]] = -1;
-
-    std::fill(H_i, H_i + gs.K * gs.K, 0.0);
-    std::fill(g_i, g_i + gs.K, 0.0);
-    if (u_i) std::fill(u_i, u_i + gs.K, 0.0);
-    gs.trip(Z_act, w_y_buf.data(), w_r_ptr, b_buf, H_i, g_i, u_i);
 }

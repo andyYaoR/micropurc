@@ -289,20 +289,20 @@ static nb::tuple group_schur_contributions_native(
         x_hat = nb::cast<nb::ndarray<double, nb::shape<-1>, nb::c_contig>>(x_hat_obj).data();
 
     GroupSchur gs;
-    if (!gs.prepare(Z, A_arr.data(), e, m, K))
+    if (!gs.prepare_dense(Z, A_arr.data(), e, m, K))
         throw std::runtime_error("Schur contribution Cholesky failed");
 
     double *H = new double[(int64_t)n * K * K]();
     double *g = new double[(int64_t)n * K]();
     double *u = new double[(int64_t)n * K]();
-    std::vector<double> w_y(e), w_r(e), buf;
+    std::vector<double> w_y(e), w_r(e);
     for (int t = 0; t < n; t++) {
         const double *y = Y_arr.data() + (int64_t)t * e;
         for (int i = 0; i < e; i++) w_y[i] = scale[i] * y[i];
         if (x_hat)
             for (int i = 0; i < e; i++) w_r[i] = scale[i] * (y[i] - x_hat[i]);
-        gs.trip(Z, w_y.data(), x_hat ? w_r.data() : nullptr, buf, H + (int64_t)t * K * K,
-                g + (int64_t)t * K, u + (int64_t)t * K);
+        gs.trip_dense(w_y.data(), x_hat ? w_r.data() : nullptr, H + (int64_t)t * K * K,
+                      g + (int64_t)t * K, u + (int64_t)t * K);
     }
     nb::capsule H_owner(H, [](void *p) noexcept { delete[] (double *)p; });
     nb::capsule g_owner(g, [](void *p) noexcept { delete[] (double *)p; });
@@ -1096,8 +1096,9 @@ class NativePIQPContext {
             int prev_o = -1, prev_d = -1;
             Eigen::VectorXd b_vec = Eigen::VectorXd::Zero(V);
 
-            std::vector<int> active_idx, kept_rows, active_pos_map(L, -1);
-            std::vector<double> A_local_buf, Z_act_buf, y_active_buf, w_y_buf, w_r_buf, b_buf;
+            std::vector<int> active_idx, kept_rows;
+            std::vector<double> A_local_buf, Z_act_buf, c_buf;
+            std::vector<int> row_map_scratch;
             std::vector<double> H_i(K * K), g_i(K), u_i(K);
             GroupSchur group_schur;
             // CTS thread-local scratch
@@ -1212,8 +1213,11 @@ class NativePIQPContext {
 
                 // The group's share of the Schur step, once for all its trips.
                 auto t_group0 = std::chrono::steady_clock::now();
-                bool group_ok = group_schur.prepare(Z_act_buf.data(), A_local_buf.data(),
-                                                    proj.n_active, proj.m_rows, K);
+                bool group_ok =
+                    group_schur.prepare(Z_act_buf.data(), A_indptr.data(), A_indices.data(),
+                                        A_data.data(), active_idx.data(), proj.n_active,
+                                        kept_rows.data(), proj.m_rows, K, L, row_map_scratch);
+                if (group_ok && return_u) group_schur.scores_offset(scale_m.data(), x_slot, c_buf);
                 schur_time_local[tid] +=
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t_group0)
                         .count();
@@ -1223,11 +1227,9 @@ class NativePIQPContext {
                     auto t_schur0 = std::chrono::steady_clock::now();
                     bool trip_ok = group_ok;
                     if (group_ok)
-                        accumulate_trip_group(group_schur, active_idx.data(), proj.n_active,
-                                              Z_act_buf.data(), scale_m.data(), y_indices, y_data,
-                                              ys, ye, x_slot, return_u, active_pos_map,
-                                              y_active_buf, w_y_buf, w_r_buf, b_buf, H_i.data(),
-                                              g_i.data(), u_i.data());
+                        group_schur.trip(scale_m.data(), y_indices, y_data, ys, ye,
+                                         return_u ? c_buf.data() : nullptr, H_i.data(), g_i.data(),
+                                         u_i.data());
                     auto t_schur1 = std::chrono::steady_clock::now();
                     schur_time_local[tid] +=
                         std::chrono::duration<double>(t_schur1 - t_schur0).count();
@@ -1782,9 +1784,9 @@ static nb::tuple batch_solve_and_accumulate(
         double *H_loc = H_locals[tid].data();
         double *g_loc = g_locals[tid].data();
         std::vector<int> active_idx, kept_rows;
-        std::vector<double> A_local_buf, Z_act_buf, w_y_buf, w_r_buf, b_buf;
-        std::vector<int> active_pos_map(L, -1);
-        std::vector<double> x_u(L, 0.0), y_active_buf, zbl_scratch(L, 0.0);
+        std::vector<double> A_local_buf, Z_act_buf, c_buf;
+        std::vector<int> row_map_scratch;
+        std::vector<double> x_u(L, 0.0), zbl_scratch(L, 0.0);
         std::vector<double> H_i(K * K), g_i(K), u_i(K);
         GroupSchur group_schur;
 
@@ -1831,8 +1833,10 @@ static nb::tuple batch_solve_and_accumulate(
 
             // The group's share of the Schur step, once for all its trips.
             auto t_group0 = std::chrono::steady_clock::now();
-            bool group_ok = group_schur.prepare(Z_act_buf.data(), A_local_buf.data(), proj.n_active,
-                                                proj.m_rows, K);
+            bool group_ok = group_schur.prepare(Z_act_buf.data(), A_indptr, A_indices, A_data,
+                                                active_idx.data(), proj.n_active, kept_rows.data(),
+                                                proj.m_rows, K, L, row_map_scratch);
+            if (group_ok && return_u) group_schur.scores_offset(scale_m, x_u.data(), c_buf);
             schur_time_local[tid] +=
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t_group0).count();
 
@@ -1843,10 +1847,9 @@ static nb::tuple batch_solve_and_accumulate(
                 auto t_schur0 = std::chrono::steady_clock::now();
                 bool trip_ok = group_ok;
                 if (group_ok)
-                    accumulate_trip_group(
-                        group_schur, active_idx.data(), proj.n_active, Z_act_buf.data(), scale_m,
-                        y_indices, y_data, ys, ye, x_u.data(), return_u, active_pos_map,
-                        y_active_buf, w_y_buf, w_r_buf, b_buf, H_i.data(), g_i.data(), u_i.data());
+                    group_schur.trip(scale_m, y_indices, y_data, ys, ye,
+                                     return_u ? c_buf.data() : nullptr, H_i.data(), g_i.data(),
+                                     u_i.data());
                 auto t_schur1 = std::chrono::steady_clock::now();
                 schur_time_local[tid] += std::chrono::duration<double>(t_schur1 - t_schur0).count();
 
