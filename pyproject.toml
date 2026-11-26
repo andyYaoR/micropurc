@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "micropurc"
-version = "0.1.2"
+version = "0.1.3"
 description = "Estimating the perturbed utility route choice model with trip-level data"
 readme = "README.md"
 license = "MIT"

@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-11-26
+
+### Changed
+
+- A pass over the trips factorises each OD group's Schur system once, sparsely,
+  and a trip costs only its route. `G = A A'` is the grounded Laplacian of the
+  group's active subnetwork; it is now factorised once per group with a sparse
+  LL' (Eigen's `SimplicialLLT`, approximate-minimum-degree ordering) instead of
+  densely for every trip. The projected design `R = P Z` and `H_i = Z' P Z` are
+  formed once per group, and a trip's `g_i = R' w_y` and
+  `u_i = g_i - R' (scale * x_hat)` read only the links it traverses. On the
+  30,772-link Copenhagen network, a pass over 13,200 trips in 132 OD pairs takes
+  0.64 s instead of 20 s with BLAS and 290 s without it (the Windows wheel's
+  path), and a fit of 1,008,000 trips in 4,032 OD pairs takes 71 s on 14 cores,
+  nearly all of it the per-pair forward QPs. The Schur step no longer uses
+  BLAS, so every platform runs it at the same speed. Results agree with 0.1.2 to
+  about 1e-12 relative.
+
+### Added
+
+- `micropurc._native.group_schur_contributions`: the Schur contributions of
+  several trips on one active set, factorised once; the test suite holds it
+  against `schur_contribution` trip by trip.
+
 ## [0.1.2] - 2026-08-10
 
 ### Changed
