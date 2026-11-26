@@ -61,8 +61,10 @@ dev = [
     # forward QP through this independently built PIQP and compares it with the
     # vendored PIQP compiled into the extension. Tests needing it are marked
     # `oracle` and skip when it is absent, so wheel-test environments (which do
-    # not install it) stay green.
-    "piqp>=0.4",
+    # not install it) stay green. piqp 0.8.0 publishes no wheel for CPython 3.15
+    # and its source build needs a system Eigen the CI runners lack, so on 3.15
+    # the oracle tests skip rather than the install failing.
+    "piqp>=0.4; python_version < '3.15'",
 ]
 docs = [
     "sphinx>=7.0",
